@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+Lib/
+Scripts/
+pyvenv.cfg
+.idea/
+data.json
+data.*.json
+ae_parser_config.json
+_install_test/
