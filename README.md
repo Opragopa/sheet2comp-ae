@@ -6,6 +6,7 @@
 
 - Adobe After Effects 2024+
 - Python 3
+- Python-пакеты из `requirements.txt`
 - Google Sheet должен быть доступен по CSV/export ссылке
 
 ## Установка Windows
@@ -24,6 +25,7 @@ install_windows.bat "C:\Program Files\Adobe\Adobe After Effects 2026\Support Fil
 
 ```sh
 chmod +x install_macos.sh
+python3 -m pip install -r requirements.txt
 ./install_macos.sh
 ```
 
