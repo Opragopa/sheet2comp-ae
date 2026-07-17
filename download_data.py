@@ -4,130 +4,89 @@ import json
 import urllib.request
 import os
 import sys
-import time
-from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+from pathlib import Path
 
-
-def add_cache_buster(url):
-    parsed = urlparse(url)
-    if parsed.scheme == "file":
-        return url
-
-    separator = "&" if "?" in url else "?"
-    return url + separator + "t=" + str(int(time.time()))
-
-
-def normalize_google_sheets_url(url):
+def get_safe_output_path(output_json_path):
     """
-    Converts a regular Google Sheets edit URL to CSV export URL.
-    Already-exported CSV/gviz URLs are returned unchanged.
+    Проверяем, можно ли записать в указанную папку.
+    Если нет — используем папку Documents пользователя.
     """
-    if "docs.google.com/spreadsheets" not in url or "/d/" not in url:
-        return url
-    if "format=csv" in url or "tqx=out:csv" in url:
-        return url
-
-    parsed = urlparse(url)
-    parts = parsed.path.split("/")
     try:
-        sheet_id = parts[parts.index("d") + 1]
-    except (ValueError, IndexError):
-        return url
-
-    query = parse_qs(parsed.query)
-    gid = query.get("gid", ["0"])[0]
-    export_path = "/spreadsheets/d/{}/export".format(sheet_id)
-    export_query = urlencode({"format": "csv", "gid": gid})
-    return urlunparse((parsed.scheme, parsed.netloc, export_path, "", export_query, ""))
-
+        # Пробуем создать файл в указанной папке
+        test_path = Path(output_json_path)
+        test_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Проверяем права на запись
+        with open(output_json_path, 'w', encoding='utf-8') as f:
+            f.write('')
+        os.remove(output_json_path)  # Удаляем тестовый файл
+        
+        return output_json_path
+    except (PermissionError, OSError):
+        # Если нет прав — используем Documents
+        home = Path.home()
+        documents_path = home / "Documents" / "ae_plaque_data"
+        documents_path.mkdir(parents=True, exist_ok=True)
+        
+        # Сохраняем только имя файла
+        filename = Path(output_json_path).name
+        safe_path = documents_path / filename
+        
+        print(f"WARNING: Нет прав на запись в {output_json_path}")
+        print(f"INFO: Сохраняем в {safe_path}")
+        
+        return safe_path
 
 def download_and_convert(google_csv_url, output_json_path):
     """
     Скачивает CSV по ссылке и конвертирует в JSON
     """
     try:
-        google_csv_url = add_cache_buster(normalize_google_sheets_url(google_csv_url))
-        print(f"DEBUG: Начинаем загрузку с URL: {google_csv_url[:80]}...")
-
-        # Добавляем User-Agent, чтобы Google не блокировал запрос
-        req = urllib.request.Request(
-            google_csv_url,
-            headers={
-                'User-Agent': 'Mozilla/5.0',
-                'Cache-Control': 'no-cache',
-                'Pragma': 'no-cache'
-            }
-        )
-
-        # Скачиваем данные
+        print(f"DEBUG: Загрузка с URL: {google_csv_url[:80]}...")
+        
+        # Добавляем User-Agent, чтобы Google не блокировал
+        req = urllib.request.Request(google_csv_url, headers={'User-Agent': 'Mozilla/5.0'})
+        
         with urllib.request.urlopen(req, timeout=30) as response:
-            csv_data = response.read().decode('utf-8-sig')
-            lines = csv_data.splitlines()
-
-            print("DEBUG: lines =", len(lines))
-
-            for i in range(min(10, len(lines))):
-                print("LINE", i, lines[i])
-            print(csv_data[:500])
+            csv_data = response.read().decode('utf-8')
             print(f"DEBUG: Загружено байт: {len(csv_data)}")
-
-        if csv_data.lstrip().lower().startswith("<!doctype html") or csv_data.lstrip().lower().startswith("<html"):
-            print("ERROR:Google returned HTML instead of CSV. Check sharing/publication settings.")
-            return False
-
-        # Парсим CSV
-        reader = csv.DictReader(csv_data.splitlines())
+        
+        # Правильный парсинг CSV с учётом переносов строк
+        import io
+        reader = csv.DictReader(io.StringIO(csv_data))
         data_list = list(reader)
-        if not reader.fieldnames:
-            print("ERROR:CSV header row not found")
-            return False
-
         print(f"DEBUG: Распарсено строк: {len(data_list)}")
-
+        
+        # Получаем безопасный путь для сохранения
+        safe_path = get_safe_output_path(output_json_path)
+        
         # Сохраняем JSON
-        output_dir = os.path.dirname(os.path.abspath(output_json_path))
-        if output_dir:
-            os.makedirs(output_dir, exist_ok=True)
-
-        with open(output_json_path, 'w', encoding='utf-8') as json_file:
+        with open(safe_path, 'w', encoding='utf-8') as json_file:
             json.dump(data_list, json_file, ensure_ascii=False, indent=4)
-
+        
         print(f"SUCCESS:{len(data_list)}")
-        print(f"DEBUG: Файл сохранен: {output_json_path}")
+        print(f"DEBUG: Файл сохранен: {safe_path}")
         return True
-
-    except urllib.error.HTTPError as e:
-        print(f"ERROR:HTTP Error {e.code}: {e.reason}")
-        return False
-    except urllib.error.URLError as e:
-        print(f"ERROR:URL Error: {e.reason}")
-        return False
+        
     except Exception as e:
-        print(f"ERROR:Unexpected error: {str(e)}")
+        print(f"ERROR:{e}")
+        import traceback
+        traceback.print_exc()
         return False
-
 
 if __name__ == "__main__":
     print(f"DEBUG: Python version: {sys.version}")
     print(f"DEBUG: Arguments count: {len(sys.argv)}")
-
-    # Проверяем количество аргументов
+    
     if len(sys.argv) < 3:
-        print("ERROR:Недостаточно аргументов")
-        print(f"USAGE: python download_data.py <google_sheets_url> <output_json_path>")
-        print(f"Received {len(sys.argv)} arguments, expected 3")
+        print("ERROR: Недостаточно аргументов")
+        print(f"USAGE: python download_data.py <url> <output_json_path>")
         sys.exit(1)
-
-    # Первый аргумент - URL таблицы
+    
     csv_url = sys.argv[1]
-
-    # Второй аргумент - путь к output JSON
     json_path = sys.argv[2]
-
+    
     print(f"DEBUG: Output path: {json_path}")
-
-    # Запускаем загрузку и конвертацию
+    
     success = download_and_convert(csv_url, json_path)
-
-    # Выход с кодом успеха/ошибки
     sys.exit(0 if success else 1)
