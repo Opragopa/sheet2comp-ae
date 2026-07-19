@@ -3,6 +3,8 @@ setlocal
 
 set "SCRIPT_DIR=%~dp0"
 set "JSX=Sheets-to-AE-Comp-Generator.jsx"
+set "TOPICS_JSX=session_topics_from_sheet.jsx"
+set "TOPICS_EXAMPLE=session_topics_example.tsv"
 set "PY=download_data.py"
 
 if not exist "%SCRIPT_DIR%%JSX%" (
@@ -12,6 +14,16 @@ if not exist "%SCRIPT_DIR%%JSX%" (
 
 if not exist "%SCRIPT_DIR%%PY%" (
   echo Missing %PY%
+  exit /b 1
+)
+
+if not exist "%SCRIPT_DIR%%TOPICS_JSX%" (
+  echo Missing %TOPICS_JSX%
+  exit /b 1
+)
+
+if not exist "%SCRIPT_DIR%%TOPICS_EXAMPLE%" (
+  echo Missing %TOPICS_EXAMPLE%
   exit /b 1
 )
 
@@ -44,6 +56,12 @@ if not exist "%AE_SCRIPTS%" mkdir "%AE_SCRIPTS%"
 if errorlevel 1 exit /b 1
 
 copy /Y "%SCRIPT_DIR%%JSX%" "%AE_SCRIPTS%\%JSX%" >nul
+if errorlevel 1 exit /b 1
+
+copy /Y "%SCRIPT_DIR%%TOPICS_JSX%" "%AE_SCRIPTS%\%TOPICS_JSX%" >nul
+if errorlevel 1 exit /b 1
+
+copy /Y "%SCRIPT_DIR%%TOPICS_EXAMPLE%" "%AE_SCRIPTS%\%TOPICS_EXAMPLE%" >nul
 if errorlevel 1 exit /b 1
 
 copy /Y "%SCRIPT_DIR%%PY%" "%AE_SCRIPTS%\%PY%" >nul

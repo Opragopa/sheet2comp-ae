@@ -3,10 +3,12 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 JSX="Sheets-to-AE-Comp-Generator.jsx"
+TOPICS_JSX="session_topics_from_sheet.jsx"
+TOPICS_EXAMPLE="session_topics_example.tsv"
 PY="download_data.py"
 
-if [[ ! -f "$SCRIPT_DIR/$JSX" || ! -f "$SCRIPT_DIR/$PY" ]]; then
-  echo "Missing $JSX or $PY"
+if [[ ! -f "$SCRIPT_DIR/$JSX" || ! -f "$SCRIPT_DIR/$TOPICS_JSX" || ! -f "$SCRIPT_DIR/$TOPICS_EXAMPLE" || ! -f "$SCRIPT_DIR/$PY" ]]; then
+  echo "Missing $JSX, $TOPICS_JSX, $TOPICS_EXAMPLE or $PY"
   exit 1
 fi
 
@@ -37,6 +39,8 @@ fi
 
 mkdir -p "$AE_SCRIPTS"
 cp "$SCRIPT_DIR/$JSX" "$AE_SCRIPTS/$JSX"
+cp "$SCRIPT_DIR/$TOPICS_JSX" "$AE_SCRIPTS/$TOPICS_JSX"
+cp "$SCRIPT_DIR/$TOPICS_EXAMPLE" "$AE_SCRIPTS/$TOPICS_EXAMPLE"
 cp "$SCRIPT_DIR/$PY" "$AE_SCRIPTS/$PY"
 
 python3 - "$AE_SCRIPTS/ae_parser_config.json" "$PYTHON_CMD" <<'PY'

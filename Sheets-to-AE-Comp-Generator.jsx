@@ -112,6 +112,105 @@ function escapeRegExp(value) {
     return value.toString().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+var COMMON_FIRST_NAMES = {
+    "александр": true, "александра": true, "алексей": true, "алена": true, "алина": true,
+    "анастасия": true, "анатолий": true, "андрей": true, "анна": true, "антон": true,
+    "арина": true, "артем": true, "борис": true, "вадим": true, "валентин": true,
+    "валентина": true, "валерий": true, "валерия": true, "василий": true, "вера": true,
+    "виктор": true, "виктория": true, "виталий": true, "владимир": true, "владислав": true,
+    "вячеслав": true, "галина": true, "георгий": true, "глеб": true, "дарья": true,
+    "денис": true, "дмитрий": true, "евгений": true, "евгения": true, "екатерина": true,
+    "елена": true, "елизавета": true, "элла": true, "иван": true, "игорь": true, "илья": true,
+    "инна": true, "ирина": true, "кирилл": true, "константин": true, "ксения": true,
+    "лев": true, "леонид": true, "любовь": true, "людмила": true, "максим": true,
+    "маргарита": true, "марина": true, "мария": true, "михаил": true, "надежда": true,
+    "наталья": true, "никита": true, "николай": true, "олег": true, "ольга": true,
+    "павел": true, "петр": true, "полина": true, "роман": true, "светлана": true,
+    "семен": true, "сергей": true, "софия": true, "станислав": true, "степан": true,
+    "татьяна": true, "тимофей": true, "федор": true, "юлия": true, "юрий": true,
+    "яна": true, "ярослав": true
+};
+
+function normalizeNameToken(value) {
+    return trimText(value).toLowerCase().replace(/ё/g, "е").replace(/\.$/, "");
+}
+
+function isKnownFirstName(value) {
+    return COMMON_FIRST_NAMES[normalizeNameToken(value)] === true;
+}
+
+function isPatronymic(value) {
+    var text = normalizeNameToken(value);
+    return /(вич|вна|ич|ична|оглы|кызы)$/.test(text);
+}
+
+function looksLikeSurname(value) {
+    var text = normalizeNameToken(value);
+    return /(ов|ова|ев|ева|ёв|ёва|ин|ина|ын|ына|ский|ская|цкий|цкая|енко|ко|ук|юк|ич|ых|их)$/.test(text);
+}
+
+function cleanNameToken(value) {
+    return trimText(value)
+        .replace(/\.$/, "")
+        .replace(/^[,;:()\[\]{}"']+|[,;:()\[\]{}"']+$/g, "");
+}
+
+function formatNameForPlate(value) {
+    var text = trimText(value || "")
+        .replace(/[\r\n\t]+/g, " ")
+        .replace(/\s+/g, " ");
+    if (text === "") {
+        return "";
+    }
+
+    var rawParts = text.replace(/[,;]+/g, " ").split(" ");
+    var parts = [];
+    for (var i = 0; i < rawParts.length; i++) {
+        var part = cleanNameToken(rawParts[i]);
+        if (part !== "" && !isPatronymic(part)) {
+            parts.push(part);
+        }
+    }
+
+    if (parts.length === 0) {
+        return "";
+    }
+    if (parts.length === 1) {
+        return parts[0].toUpperCase();
+    }
+
+    var first = parts[0];
+    var second = parts[1];
+    var firstIsName = isKnownFirstName(first);
+    var secondIsName = isKnownFirstName(second);
+    var firstIsSurname = looksLikeSurname(first);
+    var secondIsSurname = looksLikeSurname(second);
+    var name;
+    var surname;
+
+    if (firstIsName && !secondIsName) {
+        name = first;
+        surname = second;
+    } else if (secondIsName && !firstIsName) {
+        name = second;
+        surname = first;
+    } else if (firstIsSurname && !secondIsSurname) {
+        name = second;
+        surname = first;
+    } else if (secondIsSurname && !firstIsSurname) {
+        name = first;
+        surname = second;
+    } else if (rawParts.length >= 3) {
+        name = second;
+        surname = first;
+    } else {
+        name = first;
+        surname = second;
+    }
+
+    return trimText(name + " " + surname).toUpperCase();
+}
+
 function quoteShellArg(value) {
     var text = value.toString();
     if (isWindows) {
@@ -570,10 +669,10 @@ function generatePlates(masterComp, settings) {
             
             var newComp = masterComp.duplicate();
             var delimRegex = new RegExp(escapeRegExp(delim), "g");
-            var fullName = speakerName.toString().replace(delimRegex, " ");
+            var fullName = formatNameForPlate(speakerName.toString().replace(delimRegex, " "));
             var position = (rowData[posField] || "").toString().replace(delimRegex, " ");
             
-            newComp.name = prefix + delim + trimText(fullName) + delim + trimText(position);
+            newComp.name = prefix + delim + fullName + delim + trimText(position);
             newComp.parentFolder = targetFolder;
             
             createdCount++;
