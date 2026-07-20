@@ -30,6 +30,8 @@ function loadSettings() {
         csvUrl: "https://docs.google.com/spreadsheets/d/12lVA34EgWG6oy4xw8w7tKga7pOqCpxyXtUoka4XYDWc/gviz/tq?tqx=out:csv&gid=1878161624",
         nameField: "ФИО спикера",
         positionField: "Должность",
+        nameLayer: "ИМЯ",
+        positionLayer: "РЕГАЛИИ",
         delimiter: "_",
         compPrefix: "Плашка"
     };
@@ -110,6 +112,216 @@ function trimText(value) {
 
 function escapeRegExp(value) {
     return value.toString().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function normalizeSearchText(value) {
+    return trimText(value || "").replace(/\s+/g, " ").toLowerCase();
+}
+
+function normalizeCompNameKey(value) {
+    return normalizeSearchText(value);
+}
+
+function collectExistingCompNames() {
+    var names = {};
+    for (var i = 1; i <= app.project.items.length; i++) {
+        var item = app.project.items[i];
+        if (item instanceof CompItem) {
+            names[normalizeCompNameKey(item.name)] = true;
+        }
+    }
+    return names;
+}
+
+function itemNameExistsInFolder(folder, name) {
+    var key = normalizeCompNameKey(name);
+    for (var i = 1; i <= app.project.items.length; i++) {
+        var item = app.project.items[i];
+        if (item.parentFolder === folder && normalizeCompNameKey(item.name) === key) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function makeUniqueFolderName(parentFolder, baseName) {
+    var name = baseName;
+    var index = 2;
+    while (itemNameExistsInFolder(parentFolder, name)) {
+        name = baseName + " " + index;
+        index++;
+    }
+    return name;
+}
+
+function createNewPlatesFolder(parentFolder, prefix) {
+    var now = new Date();
+    var yyyy = now.getFullYear();
+    var mm = ("0" + (now.getMonth() + 1)).slice(-2);
+    var dd = ("0" + now.getDate()).slice(-2);
+    var hh = ("0" + now.getHours()).slice(-2);
+    var mi = ("0" + now.getMinutes()).slice(-2);
+    var baseName = prefix + "_новые_" + yyyy + "-" + mm + "-" + dd + "_" + hh + "-" + mi;
+    var folder = app.project.items.addFolder(makeUniqueFolderName(parentFolder, baseName));
+    folder.parentFolder = parentFolder;
+    return folder;
+}
+
+function getSourceTextProperty(layer) {
+    if (!layer) {
+        return null;
+    }
+
+    var textProps = layer.property("ADBE Text Properties");
+    if (!textProps) {
+        return null;
+    }
+
+    return textProps.property("ADBE Text Document");
+}
+
+function getSourceTextValue(textProp) {
+    if (!textProp) {
+        return "";
+    }
+
+    var value = textProp.value;
+    if (value && value.text !== undefined) {
+        return value.text;
+    }
+
+    return value ? value.toString() : "";
+}
+
+function candidateMatches(value, candidates) {
+    var normalized = normalizeSearchText(value);
+    for (var i = 0; i < candidates.length; i++) {
+        if (normalized === normalizeSearchText(candidates[i])) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function expressionReadsCompNamePart(textProp, splitIndex) {
+    if (!textProp || !textProp.expression) {
+        return false;
+    }
+
+    var expression = textProp.expression.toString();
+    return expression.indexOf("thisComp.name") !== -1 &&
+        expression.indexOf(".split") !== -1 &&
+        expression.indexOf("[" + splitIndex + "]") !== -1;
+}
+
+function findTextLayer(comp, candidates, splitIndex) {
+    var layer;
+    var textProp;
+
+    for (var i = 1; i <= comp.numLayers; i++) {
+        layer = comp.layer(i);
+        textProp = getSourceTextProperty(layer);
+        if (textProp && candidateMatches(layer.name, candidates)) {
+            return layer;
+        }
+    }
+
+    for (var j = 1; j <= comp.numLayers; j++) {
+        layer = comp.layer(j);
+        textProp = getSourceTextProperty(layer);
+        if (textProp && candidateMatches(getSourceTextValue(textProp), candidates)) {
+            return layer;
+        }
+    }
+
+    for (var k = 1; k <= comp.numLayers; k++) {
+        layer = comp.layer(k);
+        textProp = getSourceTextProperty(layer);
+        if (textProp && expressionReadsCompNamePart(textProp, splitIndex)) {
+            return layer;
+        }
+    }
+
+    return null;
+}
+
+function expressionStringLiteral(value) {
+    return "\"" + String(value || "")
+        .replace(/\\/g, "\\\\")
+        .replace(/"/g, "\\\"")
+        .replace(/\r/g, "\\r")
+        .replace(/\n/g, "\\n") + "\"";
+}
+
+function buildRegaliaAutoScaleExpression(value) {
+    return [
+        "function sliderValue(name, defaultValue) {",
+        "    try {",
+        "        return thisComp.layer(\"CONTROLLER\").effect(name)(\"Slider\").value;",
+        "    } catch (e) {",
+        "        return defaultValue;",
+        "    }",
+        "}",
+        "",
+        "var txt = " + expressionStringLiteral(value) + ";",
+        "if (txt === \"\") {",
+        "    txt = \"Должность не задана\";",
+        "}",
+        "",
+        "var baseSize = sliderValue(\"Regalia Base Size\", 42);",
+        "var minSize = sliderValue(\"Regalia Min Size\", 10);",
+        "var boxChars = sliderValue(\"Regalia Chars Per Line\", 24);",
+        "var maxLines = sliderValue(\"Regalia Max Lines\", 4);",
+        "var manualSize = sliderValue(\"Regalia Manual Size\", 0);",
+        "",
+        "var clean = txt.toString().replace(/\\s+/g, \" \");",
+        "var chars = clean.length;",
+        "var estimatedLines = Math.ceil(chars / Math.max(boxChars, 1));",
+        "",
+        "var k = maxLines / Math.max(estimatedLines, 1);",
+        "var nextSize = Math.floor(baseSize * Math.min(1, k));",
+        "nextSize = Math.max(minSize, nextSize);",
+        "",
+        "if (manualSize > 0) {",
+        "    nextSize = manualSize;",
+        "}",
+        "",
+        "style",
+        "    .setFontSize(nextSize)",
+        "    .setText(txt);"
+    ].join("\n");
+}
+
+function setTextLayerValue(comp, candidates, splitIndex, value, label, expressionText) {
+    var layer = findTextLayer(comp, candidates, splitIndex);
+    if (!layer) {
+        throw new Error("В композиции \"" + comp.name + "\" не найден текстовый слой для поля \"" + label + "\". Проверьте имя слоя: " + candidates.join(" / "));
+    }
+
+    var textProp = getSourceTextProperty(layer);
+    if (textProp.canSetExpression) {
+        try {
+            textProp.expressionEnabled = false;
+            if (textProp.expression) {
+                textProp.expression = "";
+            }
+        } catch (expressionError) {
+            textProp.expressionEnabled = false;
+        }
+    }
+
+    var textDocument = textProp.value;
+    if (textDocument && textDocument.text !== undefined) {
+        textDocument.text = value;
+        textProp.setValue(textDocument);
+    } else {
+        textProp.setValue(value);
+    }
+
+    if (expressionText && textProp.canSetExpression) {
+        textProp.expression = expressionText;
+        textProp.expressionEnabled = true;
+    }
 }
 
 var COMMON_FIRST_NAMES = {
@@ -311,6 +523,12 @@ function main() {
     var lblPos = grpFields.add("statictext", undefined, "Колонка с должностью:");
     var edtPos = grpFields.add("edittext", undefined, settings.positionField);
 
+    var lblNameLayer = grpFields.add("statictext", undefined, "Слой имени:");
+    var edtNameLayer = grpFields.add("edittext", undefined, settings.nameLayer);
+
+    var lblPosLayer = grpFields.add("statictext", undefined, "Слой регалий:");
+    var edtPosLayer = grpFields.add("edittext", undefined, settings.positionLayer);
+
     // ГРУППА: Формат имени композиции
     var grpFormat = win.add("panel", undefined, "📝 Формат имени");
     grpFormat.orientation = "column";
@@ -344,6 +562,8 @@ function main() {
         settings.csvUrl = edtUrl.text;
         settings.nameField = edtName.text;
         settings.positionField = edtPos.text;
+        settings.nameLayer = edtNameLayer.text;
+        settings.positionLayer = edtPosLayer.text;
         settings.compPrefix = edtPrefix.text;
         settings.delimiter = edtDelim.text;
         
@@ -363,6 +583,8 @@ function main() {
         settings.csvUrl = edtUrl.text;
         settings.nameField = edtName.text;
         settings.positionField = edtPos.text;
+        settings.nameLayer = edtNameLayer.text;
+        settings.positionLayer = edtPosLayer.text;
         settings.compPrefix = edtPrefix.text;
         settings.delimiter = edtDelim.text;
         
@@ -374,8 +596,7 @@ function main() {
         var prefix = edtPrefix.text || "Плашка";
         var delim = edtDelim.text || "_";
         var name = edtName.text ? "Иван Иванов" : "Имя";
-        var pos = edtPos.text ? "Директор" : "Должность";
-        lblExample.text = "Пример: " + prefix + delim + name + delim + pos;
+        lblExample.text = "Пример: " + prefix + delim + name;
     };
 
     edtPrefix.onChanging = updateExample;
@@ -628,32 +849,24 @@ function generatePlates(masterComp, settings) {
             cleanData.push(cleanRow);
         }
         
-        // Автоочистка
-        var targetFolder = masterComp.parentFolder;
-        if (!targetFolder) {
-            targetFolder = app.project.rootFolder;
+        // Новые плашки будут складываться в новую папку рядом с master-comp.
+        var parentFolder = masterComp.parentFolder;
+        if (!parentFolder) {
+            parentFolder = app.project.rootFolder;
         }
         
         var prefix = settings.compPrefix || "Плашка";
-        var itemsToDelete = [];
-        for (var i = 1; i <= app.project.items.length; i++) {
-            var item = app.project.items[i];
-            if (item instanceof CompItem && 
-                item.parentFolder === targetFolder && 
-                item.name.indexOf(prefix) === 0) {
-                itemsToDelete.push(item);
-            }
-        }
-        
-        for (var j = 0; j < itemsToDelete.length; j++) {
-            itemsToDelete[j].remove();
-        }
+        var existingCompNames = collectExistingCompNames();
+        var targetFolder = null;
         
         // Генерация
         var createdCount = 0;
         var skippedCount = 0;
+        var skippedExistingCount = 0;
         var nameField = settings.nameField;
         var posField = settings.positionField;
+        var nameLayer = settings.nameLayer || "ИМЯ";
+        var positionLayer = settings.positionLayer || "РЕГАЛИИ";
         var delim = settings.delimiter;
         
         for (var i = 0; i < cleanData.length; i++) {
@@ -667,24 +880,38 @@ function generatePlates(masterComp, settings) {
                 continue;
             }
             
-            var newComp = masterComp.duplicate();
             var delimRegex = new RegExp(escapeRegExp(delim), "g");
             var fullName = formatNameForPlate(speakerName.toString().replace(delimRegex, " "));
             var position = (rowData[posField] || "").toString().replace(delimRegex, " ");
+            var compName = prefix + delim + fullName;
+
+            if (existingCompNames[normalizeCompNameKey(compName)]) {
+                skippedExistingCount++;
+                continue;
+            }
             
-            newComp.name = prefix + delim + fullName + delim + trimText(position);
+            var newComp = masterComp.duplicate();
+            if (!targetFolder) {
+                targetFolder = createNewPlatesFolder(parentFolder, prefix);
+            }
+            
+            newComp.name = compName;
             newComp.parentFolder = targetFolder;
+            setTextLayerValue(newComp, [nameLayer, "ИМЯ", "ИМЯ ФАМИЛИЯ"], 1, fullName, "ФИО");
+            setTextLayerValue(newComp, [positionLayer, "РЕГАЛИИ", "ДОЛЖНОСТЬ"], 2, trimText(position), "Регалии", buildRegaliaAutoScaleExpression(trimText(position)));
             
+            existingCompNames[normalizeCompNameKey(compName)] = true;
             createdCount++;
         }
         
         var message = "✅ Готово!\n\n" +
-                      "Создано: " + createdCount + "\n" +
-                      "Пропущено: " + skippedCount + "\n" +
+                      "Новых плашек создано: " + createdCount + "\n" +
+                      "Уже были в проекте: " + skippedExistingCount + "\n" +
+                      "Пропущено строк без ФИО/с ошибкой: " + skippedCount + "\n" +
                       "Всего: " + cleanData.length + "\n\n" +
-                      "📌 Expressions:\n" +
-                      "• ФИО: thisComp.name.split(\"" + delim + "\")[1]\n" +
-                      "• Должность: thisComp.name.split(\"" + delim + "\")[2]";
+                      (targetFolder ? "Папка новых плашек: " + targetFolder.name + "\n\n" : "Новых плашек не было, папка не создана.\n\n") +
+                      "Имена композиций: " + prefix + delim + "ИМЯ ФАМИЛИЯ\n" +
+                      "ФИО записано в текстовый слой, регалии записаны в expression автоподгонки размера.";
         
         alert(message, "Генератор плашек");
         

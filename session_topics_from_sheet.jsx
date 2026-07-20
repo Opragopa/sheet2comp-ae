@@ -19,6 +19,10 @@
     var DEFAULT_MAIN_COMP = "Главная";
     var DEFAULT_TITLE_LAYER = "ТЕМА";
     var DEFAULT_DESC_LAYER = "ОПИСАНИЕ";
+    var DEFAULT_TSV_FOLDER = "ae_plaque_data";
+    var DEFAULT_TSV_FILE = "session_topics_extracted.tsv";
+    var PROGRAM_FIRST_COLUMN_INDEX = 1; // B
+    var PROGRAM_LAST_COLUMN_INDEX = 3; // D
 
     function trimString(value) {
         return String(value).replace(/^\s+|\s+$/g, "");
@@ -48,6 +52,18 @@
 
     function alertError(message) {
         alert(SCRIPT_NAME + "\n\n" + message);
+    }
+
+    function normalizeText(value) {
+        return trimString(String(value || "").replace(/\r\n|\r/g, "\n").replace(/[ \t]+/g, " ").replace(/\n+/g, "\n"));
+    }
+
+    function normalizeKey(value) {
+        return normalizeText(value).replace(/\s+/g, " ").toLowerCase();
+    }
+
+    function recordKey(record) {
+        return normalizeKey(record.title);
     }
 
     function isComp(item) {
@@ -103,6 +119,22 @@
         try { nextDoc.leading = currentDoc.leading; } catch (e10) {}
 
         sourceText.setValue(nextDoc);
+    }
+
+    function getTextLayerValue(comp, layerName) {
+        var layer = findTextLayer(comp, layerName);
+        if (!layer) return "";
+        var sourceText = getSourceTextProperty(layer);
+        if (!sourceText) return "";
+        try {
+            return String(sourceText.value.text || "");
+        } catch (e1) {
+            try {
+                return String(sourceText.value || "");
+            } catch (e2) {
+                return "";
+            }
+        }
     }
 
     function parseDelimited(text, delimiter) {
@@ -192,6 +224,123 @@
         return records;
     }
 
+    function cleanTopic(value) {
+        var text = normalizeText(value);
+        text = text.replace(/^[«"'“”„]+/, "");
+        text = text.replace(/[»"'“”„\]]+$/, "");
+        return trimString(text);
+    }
+
+    function extractEventDescription(value) {
+        var text = normalizeText(value);
+        text = text.split(/(?:^|\s)Тема\s*:/i)[0];
+        text = text.split(/(?:^|\s)(?:Сценар|Сценарии|Сценарий|Сценарий|Справка)\S*/i)[0];
+        text = text.split(/\S+\.docx/i)[0];
+        text = text.replace(/\s+/g, " ");
+        return trimString(text.replace(/^[\s\-—]+|[\s\-—]+$/g, ""));
+    }
+
+    function cleanFallbackTopic(value) {
+        var text = normalizeText(value);
+        var docxQuoteMatch = text.match(/\.docx\s+[«"]([^»"\n]{8,})[»"]/i);
+        if (docxQuoteMatch) {
+            return cleanTopic(docxQuoteMatch[1]);
+        }
+
+        text = text.replace(/\S+\.docx/ig, " ");
+        text = text.replace(/(?:^|\s)СЦЕНАРИЙ\s+ДЛЯ\s+РПГ\s*:.*$/i, " ");
+        text = trimString(text.replace(/\s+/g, " ").replace(/^[\s\-—]+|[\s\-—]+$/g, ""));
+
+        var quoteMatch = text.match(/[«"]([^»"\n]{8,})[»"]/);
+        if (quoteMatch) {
+            return cleanTopic(quoteMatch[1]);
+        }
+        return cleanTopic(text);
+    }
+
+    function firstExpertMarkerIndex(text) {
+        var match = normalizeText(text).match(/(?:^|\s)(Эксперты?)\s*:/i);
+        return match ? match.index : -1;
+    }
+
+    function extractProgramRecord(value) {
+        var text = normalizeText(value);
+        if (text === "") return null;
+
+        var topicMatch = /(?:^|\s)Тема\s*:\s*(.+?)(?=\s+(?:Эксперты?|Модератор|Ведущий|Гости|Спикеры?)\s*:|$)/i.exec(text);
+        if (topicMatch) {
+            var topic = cleanTopic(topicMatch[1]);
+            var description = extractEventDescription(text.substring(0, topicMatch.index));
+            if (topic !== "" && firstExpertMarkerIndex(text.substring(topicMatch.index + topicMatch[0].length)) >= 0) {
+                return { title: topic, description: description };
+            }
+            return null;
+        }
+
+        var markerIndex = firstExpertMarkerIndex(text);
+        if (markerIndex < 0) return null;
+
+        var beforeMarker = text.substring(0, markerIndex);
+        var fallbackTitle = cleanFallbackTopic(beforeMarker);
+        var fallbackDescription = extractEventDescription(beforeMarker);
+        if (fallbackTitle !== "") {
+            return { title: fallbackTitle, description: fallbackDescription };
+        }
+        return null;
+    }
+
+    function rowsToProgramRecords(rows) {
+        var records = [];
+        var seen = {};
+        for (var r = 0; r < rows.length; r++) {
+            var row = rows[r];
+            var lastColumn = Math.min(PROGRAM_LAST_COLUMN_INDEX, row.length - 1);
+            for (var c = PROGRAM_FIRST_COLUMN_INDEX; c <= lastColumn; c++) {
+                var record = extractProgramRecord(row[c]);
+                if (!record) continue;
+                var key = recordKey(record);
+                if (seen[key]) continue;
+                seen[key] = true;
+                records.push(record);
+            }
+        }
+        return records;
+    }
+
+    function tsvEscape(value) {
+        var text = String(value || "");
+        if (text.indexOf("\"") >= 0) {
+            text = text.replace(/"/g, "\"\"");
+        }
+        if (text.indexOf("\t") >= 0 || text.indexOf("\n") >= 0 || text.indexOf("\r") >= 0 || text.indexOf("\"") >= 0) {
+            text = "\"" + text + "\"";
+        }
+        return text;
+    }
+
+    function defaultExtractedTsvFile() {
+        var folder = new Folder(Folder.myDocuments.fsName + "/" + DEFAULT_TSV_FOLDER);
+        if (!folder.exists && !folder.create()) {
+            throw new Error("Не получилось создать папку для TSV: " + folder.fsName);
+        }
+        return new File(folder.fsName + "/" + DEFAULT_TSV_FILE);
+    }
+
+    function saveRecordsToTsv(records) {
+        var file = defaultExtractedTsvFile();
+        file.encoding = "UTF-8";
+        if (!file.open("w")) {
+            throw new Error("Не получилось записать TSV: " + file.fsName);
+        }
+
+        file.write(DEFAULT_TITLE_LAYER + "\t" + DEFAULT_DESC_LAYER + "\n");
+        for (var i = 0; i < records.length; i++) {
+            file.write(tsvEscape(records[i].title) + "\t" + tsvEscape(records[i].description) + "\n");
+        }
+        file.close();
+        return file.fsName;
+    }
+
     function readLocalFile(file) {
         if (!file || !file.exists) {
             throw new Error("Файл не найден.");
@@ -214,17 +363,32 @@
         return "'" + text.replace(/'/g, "'\\''") + "'";
     }
 
+    function googleSheetExportUrl(url) {
+        var text = trimString(url);
+        if (text.indexOf("docs.google.com") < 0 || text.indexOf("/spreadsheets/d/") < 0) {
+            return text;
+        }
+
+        var idMatch = text.match(/\/spreadsheets\/d\/([^\/\?#]+)/);
+        if (!idMatch) return text;
+
+        var gidMatch = text.match(/[?#&]gid=([0-9]+)/) || text.match(/#gid=([0-9]+)/);
+        var gid = gidMatch ? gidMatch[1] : "0";
+        return "https://docs.google.com/spreadsheets/d/" + idMatch[1] + "/export?format=tsv&gid=" + gid;
+    }
+
     function downloadUrl(url) {
         var tempFile = new File(Folder.temp.fsName + "/ae_session_topics_" + new Date().getTime() + ".txt");
+        var sourceUrl = googleSheetExportUrl(url);
         var cmd;
 
         if ($.os.toLowerCase().indexOf("windows") >= 0) {
             cmd = "powershell -NoProfile -ExecutionPolicy Bypass -Command " +
                 "\"[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; " +
-                "Invoke-WebRequest -UseBasicParsing -Uri " + shellQuote(url) +
+                "Invoke-WebRequest -UseBasicParsing -Uri " + shellQuote(sourceUrl) +
                 " -OutFile " + shellQuote(tempFile.fsName) + "\"";
         } else {
-            cmd = "curl -L -s " + shellQuote(url) + " -o " + shellQuote(tempFile.fsName);
+            cmd = "curl -L -s " + shellQuote(sourceUrl) + " -o " + shellQuote(tempFile.fsName);
         }
 
         system.callSystem(cmd);
@@ -233,7 +397,48 @@
         return text;
     }
 
+    function existingRecordKeyMap(settings, mainComp) {
+        var keys = {};
+        for (var i = 1; i <= app.project.numItems; i++) {
+            var item = app.project.item(i);
+            if (!isComp(item) || item === mainComp) continue;
+
+            var title = getTextLayerValue(item, settings.titleLayerName);
+            var description = getTextLayerValue(item, settings.descLayerName);
+            if (trimString(title) === "" && trimString(description) === "") continue;
+            keys[recordKey({ title: title, description: description })] = true;
+        }
+        return keys;
+    }
+
+    function countCompsWithPrefix(prefix) {
+        var count = 0;
+        for (var i = 1; i <= app.project.numItems; i++) {
+            var item = app.project.item(i);
+            if (isComp(item) && item.name.indexOf(prefix) === 0) {
+                count++;
+            }
+        }
+        return count;
+    }
+
     function makeComps(settings) {
+        var text = settings.sourceMode === "url" ? downloadUrl(settings.url) : readLocalFile(settings.file);
+        var delimiter = settings.delimiter === "auto" ? guessDelimiter(text) : settings.delimiter;
+        var rows = parseDelimited(text, delimiter);
+        var records = settings.programMode
+            ? rowsToProgramRecords(rows)
+            : rowsToRecords(rows, settings.titleColumnName, settings.descColumnName);
+
+        if (records.length === 0) {
+            throw new Error("Во входных данных нет строк с темами.");
+        }
+
+        var savedTsvPath = "";
+        if (settings.saveExtractedTsv && settings.programMode) {
+            savedTsvPath = saveRecordsToTsv(records);
+        }
+
         if (!app.project) {
             throw new Error("Открой проект After Effects.");
         }
@@ -243,22 +448,23 @@
             throw new Error("Не найдена главная композиция \"" + settings.mainCompName + "\".");
         }
 
-        var text = settings.sourceMode === "url" ? downloadUrl(settings.url) : readLocalFile(settings.file);
-        var delimiter = settings.delimiter === "auto" ? guessDelimiter(text) : settings.delimiter;
-        var rows = parseDelimited(text, delimiter);
-        var records = rowsToRecords(rows, settings.titleColumnName, settings.descColumnName);
-
-        if (records.length === 0) {
-            throw new Error("Во входных данных нет строк с темами.");
-        }
-
         var created = [];
+        var skipped = [];
+        var existingKeys = existingRecordKeyMap(settings, mainComp);
+        var nextNumber = countCompsWithPrefix(settings.namePrefix) + 1;
         app.beginUndoGroup(SCRIPT_NAME);
         try {
             for (var i = 0; i < records.length; i++) {
                 var record = records[i];
+                var key = recordKey(record);
+                if (existingKeys[key]) {
+                    skipped.push(record.title);
+                    continue;
+                }
+
                 var comp = mainComp.duplicate();
-                comp.name = settings.namePrefix + padNumber(i + 1, 2) + " - " + sanitizeName(record.title);
+                comp.name = settings.namePrefix + padNumber(nextNumber, 2) + " - " + sanitizeName(record.title);
+                nextNumber++;
 
                 setTextLayer(comp, settings.titleLayerName, record.title);
                 setTextLayer(comp, settings.descLayerName, record.description);
@@ -267,13 +473,14 @@
                     app.project.renderQueue.items.add(comp);
                 }
                 created.push(comp.name);
+                existingKeys[key] = true;
             }
         } catch (err) {
             app.endUndoGroup();
             throw err;
         }
         app.endUndoGroup();
-        return created;
+        return { created: created, skipped: skipped, total: records.length, savedTsvPath: savedTsvPath };
     }
 
     function buildUI(thisObj) {
@@ -315,6 +522,12 @@
         var delimiterList = delimiterGroup.add("dropdownlist", undefined, ["Авто", "Tab", "Comma", "Semicolon"]);
         delimiterList.selection = 0;
 
+        var programModeCheck = sourcePanel.add("checkbox", undefined, "Программная таблица: ОПИСАНИЕ до сценария, ТЕМА из строки Тема:");
+        programModeCheck.value = true;
+
+        var saveExtractedTsvCheck = sourcePanel.add("checkbox", undefined, "Сохранить TSV для ручной правки в Documents/ae_plaque_data");
+        saveExtractedTsvCheck.value = true;
+
         var compPanel = win.add("panel", undefined, "After Effects");
         compPanel.orientation = "column";
         compPanel.alignChildren = ["fill", "top"];
@@ -349,10 +562,15 @@
             fileText.enabled = fileMode.value;
             browseButton.enabled = fileMode.value;
             urlText.enabled = urlMode.value;
+            titleColumnInput.enabled = !programModeCheck.value;
+            descColumnInput.enabled = !programModeCheck.value;
+            saveExtractedTsvCheck.enabled = programModeCheck.value;
         }
 
         fileMode.onClick = refreshMode;
         urlMode.onClick = refreshMode;
+        programModeCheck.onClick = refreshMode;
+        saveExtractedTsvCheck.onClick = refreshMode;
 
         browseButton.onClick = function () {
             var file = File.openDialog("Выбери TSV/CSV/TXT с темами", "*.tsv;*.csv;*.txt");
@@ -373,7 +591,9 @@
                     titleColumnName: titleColumnInput.text,
                     descColumnName: descColumnInput.text,
                     namePrefix: prefixInput.text,
-                    addToRenderQueue: renderQueueCheck.value
+                    addToRenderQueue: renderQueueCheck.value,
+                    programMode: programModeCheck.value,
+                    saveExtractedTsv: saveExtractedTsvCheck.value
                 };
 
                 if (settings.sourceMode === "file" && trimString(fileText.text) === "") {
@@ -383,13 +603,20 @@
                     throw new Error("Вставь URL Google Sheet CSV/TSV.");
                 }
 
-                var created = makeComps(settings);
-                alert("Готово: создано композиций " + created.length + ".");
+                var result = makeComps(settings);
+                var message = "Готово.\nСоздано композиций: " + result.created.length +
+                    "\nУже были, пропущены: " + result.skipped.length +
+                    "\nВсего найдено уникальных строк: " + result.total + ".";
+                if (result.savedTsvPath !== "") {
+                    message += "\n\nTSV для правки:\n" + result.savedTsvPath;
+                }
+                alert(message);
             } catch (err) {
                 alertError(err.message || err.toString());
             }
         };
 
+        refreshMode();
         win.layout.layout(true);
         win.layout.resize();
         win.onResizing = win.onResize = function () { this.layout.resize(); };
