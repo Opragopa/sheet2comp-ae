@@ -18,6 +18,7 @@
     var DATA_FOLDER = new Folder(Folder.myDocuments.fsName + "/ae_plaque_data");
     var JSON_FILE_NAME = "person_plates_data.json";
     var PHOTO_FOLDER_NAME = "person_plate_photos";
+    var MANUAL_TSV_NAME = "person_plates_manual.tsv";
     var REFERENCE_SHEET_URL = "https://docs.google.com/spreadsheets/d/1J6nJHM4wXF66LJO7dDNT6QgrxlQ5VPb-3B-4o7Ff0js/edit?gid=0#gid=0";
 
     function trimText(value) {
@@ -105,6 +106,8 @@
         var defaults = {
             sheetUrl: REFERENCE_SHEET_URL,
             sheetGid: "0",
+            dataMode: "Таблица",
+            manualPeopleText: "",
             nameField: "ФИО спикера",
             positionField: "Должность",
             photoField: "Фото на плашку",
@@ -142,6 +145,7 @@
             }
             if (!data.sheetUrl) data.sheetUrl = defaults.sheetUrl;
             if (!data.sheetGid) data.sheetGid = extractGoogleSheetGid(data.sheetUrl);
+            if (data.dataMode !== "Вручную" && data.dataMode !== "Таблица") data.dataMode = defaults.dataMode;
             if (data.nameField === "ИМЯ ФАМИЛИЯ") data.nameField = defaults.nameField;
             if (data.positionField === "ДОЛЖНОСТЬ") data.positionField = defaults.positionField;
             if (normalizeKey(data.photoField) === normalizeKey("фото на плашку")) data.photoField = defaults.photoField;
@@ -167,6 +171,11 @@
     function getDataJsonFile() {
         if (!DATA_FOLDER.exists) DATA_FOLDER.create();
         return new File(buildPath(DATA_FOLDER, JSON_FILE_NAME));
+    }
+
+    function getManualTsvFile() {
+        if (!DATA_FOLDER.exists) DATA_FOLDER.create();
+        return new File(buildPath(DATA_FOLDER, MANUAL_TSV_NAME));
     }
 
     function getDefaultPhotosFolder() {
@@ -297,6 +306,78 @@
         var text = cleanPlateText(value);
         if (!delimiter) return text;
         return text.replace(new RegExp(escapeRegExp(delimiter), "g"), " ");
+    }
+
+    function tsvEscape(value) {
+        return String(value || "").replace(/\r?\n/g, " ").replace(/\t/g, " ").replace(/\s+/g, " ").replace(/^\s+|\s+$/g, "");
+    }
+
+    function splitManualLine(line) {
+        var text = trimText(line);
+        if (text.indexOf("\t") !== -1) return text.split("\t");
+        if (text.indexOf("|") !== -1) return text.split("|");
+        if (text.indexOf(";") !== -1) return text.split(";");
+        return [text];
+    }
+
+    function isManualHeaderLine(parts) {
+        if (!parts || parts.length === 0) return false;
+        var first = normalizeKey(parts[0]);
+        if (first !== "фио" && first !== "фио спикера" && first !== "имя" && first !== "имя фамилия") return false;
+        if (parts.length === 1) return true;
+        var second = normalizeKey(parts[1]);
+        return second === "" || second === "должность" || second === "регалии";
+    }
+
+    function parseManualRows(text, settings) {
+        var lines = String(text || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+        var rows = [];
+        for (var i = 0; i < lines.length; i++) {
+            var line = trimText(lines[i]);
+            if (line === "") continue;
+
+            var parts = splitManualLine(line);
+            for (var p = 0; p < parts.length; p++) parts[p] = cleanPlateText(parts[p]);
+            if (rows.length === 0 && isManualHeaderLine(parts)) continue;
+
+            var name = parts[0] || "";
+            if (name === "") continue;
+            rows.push({
+                name: name,
+                position: parts.length > 1 ? parts[1] : "",
+                photo: parts.length > 2 ? parts[2] : "",
+                shift: parts.length > 3 ? parts[3] : ""
+            });
+        }
+        return rows;
+    }
+
+    function writeManualTsv(settings) {
+        var rows = parseManualRows(settings.manualPeopleText, settings);
+        if (rows.length === 0) {
+            throw new Error("Ручной список пуст. Добавьте хотя бы одну строку: Имя Фамилия | Должность | Фото/ссылка | Смена");
+        }
+
+        var file = getManualTsvFile();
+        file.encoding = "UTF-8";
+        if (!file.open("w")) throw new Error("Не удалось создать ручной TSV: " + file.fsName);
+
+        var nameHeader = trimText(settings.nameField) || "ФИО спикера";
+        var positionHeader = trimText(settings.positionField) || "Должность";
+        var photoHeader = trimText(settings.photoField) || "Фото на плашку";
+        var shiftHeader = trimText(settings.shiftField) || "Смена";
+
+        file.write([nameHeader, positionHeader, photoHeader, shiftHeader].join("\t") + "\n");
+        for (var i = 0; i < rows.length; i++) {
+            file.write([
+                tsvEscape(rows[i].name),
+                tsvEscape(rows[i].position),
+                tsvEscape(rows[i].photo),
+                tsvEscape(rows[i].shift)
+            ].join("\t") + "\n");
+        }
+        file.close();
+        return { file: file, count: rows.length };
     }
 
     function isRegaliaToken(value) {
@@ -434,6 +515,7 @@
         if (cleanPlateText(settings.shiftField) === "") return true;
 
         var shiftValue = getByColumn(row, settings.shiftField);
+        if (settings.dataMode === "Вручную" && cleanPlateText(shiftValue) === "") return true;
         var shiftTokens = splitFilterValues(shiftValue);
         var normalizedShift = normalizeFilterText(shiftValue);
         if (shiftTokens.length === 0 && normalizedShift === "") return false;
@@ -791,6 +873,16 @@
         dataTab.margins = 10;
         dataTab.spacing = 6;
 
+        var modeRow = dataTab.add("group");
+        modeRow.orientation = "row";
+        modeRow.alignChildren = ["left", "center"];
+        modeRow.spacing = 8;
+        var modeLabel = modeRow.add("statictext", undefined, "Источник данных:");
+        modeLabel.preferredSize.width = 150;
+        var ddlDataMode = modeRow.add("dropdownlist", undefined, ["Таблица", "Вручную"]);
+        ddlDataMode.selection = settings.dataMode === "Вручную" ? 1 : 0;
+        ddlDataMode.preferredSize.width = 180;
+
         var edtSheetUrl = addLabeledEdit(dataTab, "Ссылка на таблицу:", settings.sheetUrl, 150, 330);
         var sheetRow = dataTab.add("group");
         sheetRow.orientation = "row";
@@ -813,6 +905,17 @@
         chkAutoImportPhotos.value = settings.autoImportPhotos !== false;
         var edtShiftField = addLabeledEdit(dataTab, "Колонка смены:", settings.shiftField, 150, 300);
         var edtShiftFilter = addLabeledEdit(dataTab, "Выгрузить смены:", settings.shiftFilter, 150, 300);
+
+        var manualTab = tabs.add("tab", undefined, "Вручную");
+        manualTab.orientation = "column";
+        manualTab.alignChildren = ["fill", "top"];
+        manualTab.margins = 10;
+        manualTab.spacing = 6;
+        manualTab.add("statictext", undefined, "Одна строка = один человек. Формат: Имя Фамилия | Должность | Фото/ссылка | Смена");
+        var manualText = manualTab.add("edittext", undefined, settings.manualPeopleText || "", { multiline: true, scrolling: true });
+        manualText.preferredSize = [520, 210];
+        var manualHint = manualTab.add("statictext", undefined, "Можно оставить только имя. Разделители: |, табуляция или ;");
+        manualHint.characters = 70;
 
         var layersTab = tabs.add("tab", undefined, "Слои");
         layersTab.orientation = "column";
@@ -855,7 +958,7 @@
         chkRecreate.value = settings.recreateExistingComps === true;
         var chkRender = createTab.add("checkbox", undefined, "Добавить созданные композиции в Render Queue");
         chkRender.value = settings.addToRenderQueue;
-        tabs.selection = dataTab;
+        tabs.selection = settings.dataMode === "Вручную" ? manualTab : dataTab;
 
         btnReadGid.onClick = function() {
             edtSheetGid.text = extractGoogleSheetGid(edtSheetUrl.text);
@@ -863,6 +966,14 @@
 
         btnApplyGid.onClick = function() {
             edtSheetUrl.text = applyGoogleSheetGid(edtSheetUrl.text, edtSheetGid.text);
+        };
+
+        ddlDataMode.onChange = function() {
+            if (ddlDataMode.selection && ddlDataMode.selection.text === "Вручную") {
+                tabs.selection = manualTab;
+            } else {
+                tabs.selection = dataTab;
+            }
         };
 
         ddlGraphicType.onChange = function() {
@@ -883,6 +994,8 @@
         btnCreate.preferredSize.width = 160;
 
         function collectSettings() {
+            settings.dataMode = ddlDataMode.selection ? ddlDataMode.selection.text : "Таблица";
+            settings.manualPeopleText = manualText.text;
             settings.sheetGid = trimText(edtSheetGid.text) || extractGoogleSheetGid(edtSheetUrl.text);
             settings.sheetUrl = applyGoogleSheetGid(edtSheetUrl.text, settings.sheetGid);
             settings.nameField = edtNameField.text;
@@ -937,9 +1050,16 @@
         var photosFolder = getPhotosFolder(settings);
         if (jsonFile.exists) jsonFile.remove();
 
+        var source = settings.sheetUrl;
+        var manualInfo = null;
+        if (settings.dataMode === "Вручную") {
+            manualInfo = writeManualTsv(settings);
+            source = manualInfo.file.absoluteURI || manualInfo.file.fsName;
+        }
+
         var cmd = buildPythonCommand(
             runtime.pythonCmd,
-            settings.sheetUrl,
+            source,
             jsonFile.absoluteURI || jsonFile.fsName,
             photosFolder.absoluteURI || photosFolder.fsName,
             settings.photoField,
@@ -950,7 +1070,7 @@
         $.sleep(500);
 
         if (!jsonFile.exists) throw new Error("Файл JSON не создан.\n\nВывод Python:\n" + output);
-        return { rows: readJsonArray(jsonFile), output: output };
+        return { rows: readJsonArray(jsonFile), output: output, manualCount: manualInfo ? manualInfo.count : 0 };
     }
 
     function checkData(settings, runtime) {
@@ -978,6 +1098,7 @@
             }
 
             var report = "Проверка данных\n\n";
+            if (settings.dataMode === "Вручную") report += "Режим: ручной список (" + result.manualCount + " строк)\n";
             report += "Всего строк: " + rows.length + "\n";
             report += "Под фильтр смены: " + matchedShift + "\n";
             report += "С именем: " + withName + "\n";
