@@ -3,12 +3,17 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 JSX="Sheets-to-AE-Comp-Generator.jsx"
+PERSON_JSX="person_plates_from_sheet.jsx"
 TOPICS_JSX="session_topics_from_sheet.jsx"
+SHORTEN_JSX="shorten_render_queue_names.jsx"
 TOPICS_EXAMPLE="session_topics_example.tsv"
 PY="download_data.py"
+PERSON_PY="download_person_plate_data.py"
+PREPARE_PERSON_PY="prepare_person_plate_photos.py"
+EXTRACT_PY="extract_session_topics.py"
 
-if [[ ! -f "$SCRIPT_DIR/$JSX" || ! -f "$SCRIPT_DIR/$TOPICS_JSX" || ! -f "$SCRIPT_DIR/$TOPICS_EXAMPLE" || ! -f "$SCRIPT_DIR/$PY" ]]; then
-  echo "Missing $JSX, $TOPICS_JSX, $TOPICS_EXAMPLE or $PY"
+if [[ ! -f "$SCRIPT_DIR/$JSX" || ! -f "$SCRIPT_DIR/$PERSON_JSX" || ! -f "$SCRIPT_DIR/$TOPICS_JSX" || ! -f "$SCRIPT_DIR/$SHORTEN_JSX" || ! -f "$SCRIPT_DIR/$TOPICS_EXAMPLE" || ! -f "$SCRIPT_DIR/$PY" || ! -f "$SCRIPT_DIR/$PERSON_PY" || ! -f "$SCRIPT_DIR/$PREPARE_PERSON_PY" || ! -f "$SCRIPT_DIR/$EXTRACT_PY" ]]; then
+  echo "Missing $JSX, $PERSON_JSX, $TOPICS_JSX, $SHORTEN_JSX, $TOPICS_EXAMPLE, $PY, $PERSON_PY, $PREPARE_PERSON_PY or $EXTRACT_PY"
   exit 1
 fi
 
@@ -39,9 +44,14 @@ fi
 
 mkdir -p "$AE_SCRIPTS"
 cp "$SCRIPT_DIR/$JSX" "$AE_SCRIPTS/$JSX"
+cp "$SCRIPT_DIR/$PERSON_JSX" "$AE_SCRIPTS/$PERSON_JSX"
 cp "$SCRIPT_DIR/$TOPICS_JSX" "$AE_SCRIPTS/$TOPICS_JSX"
+cp "$SCRIPT_DIR/$SHORTEN_JSX" "$AE_SCRIPTS/$SHORTEN_JSX"
 cp "$SCRIPT_DIR/$TOPICS_EXAMPLE" "$AE_SCRIPTS/$TOPICS_EXAMPLE"
 cp "$SCRIPT_DIR/$PY" "$AE_SCRIPTS/$PY"
+cp "$SCRIPT_DIR/$PERSON_PY" "$AE_SCRIPTS/$PERSON_PY"
+cp "$SCRIPT_DIR/$PREPARE_PERSON_PY" "$AE_SCRIPTS/$PREPARE_PERSON_PY"
+cp "$SCRIPT_DIR/$EXTRACT_PY" "$AE_SCRIPTS/$EXTRACT_PY"
 
 python3 - "$AE_SCRIPTS/ae_parser_config.json" "$PYTHON_CMD" <<'PY'
 import json

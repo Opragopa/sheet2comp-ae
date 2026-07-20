@@ -3,9 +3,14 @@ setlocal
 
 set "SCRIPT_DIR=%~dp0"
 set "JSX=Sheets-to-AE-Comp-Generator.jsx"
+set "PERSON_JSX=person_plates_from_sheet.jsx"
 set "TOPICS_JSX=session_topics_from_sheet.jsx"
+set "SHORTEN_JSX=shorten_render_queue_names.jsx"
 set "TOPICS_EXAMPLE=session_topics_example.tsv"
 set "PY=download_data.py"
+set "PERSON_PY=download_person_plate_data.py"
+set "PREPARE_PERSON_PY=prepare_person_plate_photos.py"
+set "EXTRACT_PY=extract_session_topics.py"
 
 if not exist "%SCRIPT_DIR%%JSX%" (
   echo Missing %JSX%
@@ -17,8 +22,33 @@ if not exist "%SCRIPT_DIR%%PY%" (
   exit /b 1
 )
 
+if not exist "%SCRIPT_DIR%%PERSON_PY%" (
+  echo Missing %PERSON_PY%
+  exit /b 1
+)
+
+if not exist "%SCRIPT_DIR%%PREPARE_PERSON_PY%" (
+  echo Missing %PREPARE_PERSON_PY%
+  exit /b 1
+)
+
+if not exist "%SCRIPT_DIR%%EXTRACT_PY%" (
+  echo Missing %EXTRACT_PY%
+  exit /b 1
+)
+
+if not exist "%SCRIPT_DIR%%PERSON_JSX%" (
+  echo Missing %PERSON_JSX%
+  exit /b 1
+)
+
 if not exist "%SCRIPT_DIR%%TOPICS_JSX%" (
   echo Missing %TOPICS_JSX%
+  exit /b 1
+)
+
+if not exist "%SCRIPT_DIR%%SHORTEN_JSX%" (
+  echo Missing %SHORTEN_JSX%
   exit /b 1
 )
 
@@ -58,13 +88,28 @@ if errorlevel 1 exit /b 1
 copy /Y "%SCRIPT_DIR%%JSX%" "%AE_SCRIPTS%\%JSX%" >nul
 if errorlevel 1 exit /b 1
 
+copy /Y "%SCRIPT_DIR%%PERSON_JSX%" "%AE_SCRIPTS%\%PERSON_JSX%" >nul
+if errorlevel 1 exit /b 1
+
 copy /Y "%SCRIPT_DIR%%TOPICS_JSX%" "%AE_SCRIPTS%\%TOPICS_JSX%" >nul
+if errorlevel 1 exit /b 1
+
+copy /Y "%SCRIPT_DIR%%SHORTEN_JSX%" "%AE_SCRIPTS%\%SHORTEN_JSX%" >nul
 if errorlevel 1 exit /b 1
 
 copy /Y "%SCRIPT_DIR%%TOPICS_EXAMPLE%" "%AE_SCRIPTS%\%TOPICS_EXAMPLE%" >nul
 if errorlevel 1 exit /b 1
 
 copy /Y "%SCRIPT_DIR%%PY%" "%AE_SCRIPTS%\%PY%" >nul
+if errorlevel 1 exit /b 1
+
+copy /Y "%SCRIPT_DIR%%PERSON_PY%" "%AE_SCRIPTS%\%PERSON_PY%" >nul
+if errorlevel 1 exit /b 1
+
+copy /Y "%SCRIPT_DIR%%PREPARE_PERSON_PY%" "%AE_SCRIPTS%\%PREPARE_PERSON_PY%" >nul
+if errorlevel 1 exit /b 1
+
+copy /Y "%SCRIPT_DIR%%EXTRACT_PY%" "%AE_SCRIPTS%\%EXTRACT_PY%" >nul
 if errorlevel 1 exit /b 1
 
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$cfg=@{pythonCmd=$env:PYTHON_CMD}|ConvertTo-Json; Set-Content -LiteralPath (Join-Path $env:AE_SCRIPTS 'ae_parser_config.json') -Value $cfg -Encoding UTF8"
