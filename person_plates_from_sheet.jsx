@@ -37,6 +37,36 @@
         return "https://docs.google.com/spreadsheets/d/" + match[1] + "/gviz/tq?tqx=out:csv&gid=" + gid;
     }
 
+    function extractGoogleSheetGid(url) {
+        var text = trimText(url);
+        var gidMatch = text.match(/[?&#]gid=(\d+)/);
+        return gidMatch ? gidMatch[1] : "0";
+    }
+
+    function isGoogleSheetUrl(url) {
+        return trimText(url).indexOf("docs.google.com/spreadsheets") !== -1;
+    }
+
+    function applyGoogleSheetGid(url, gid) {
+        var text = trimText(url);
+        if (!isGoogleSheetUrl(text)) return text;
+
+        var cleanGid = trimText(gid).replace(/[^\d]/g, "");
+        if (cleanGid === "") cleanGid = "0";
+
+        if (text === "") return text;
+
+        if (text.match(/[?&#]gid=\d+/)) {
+            return text.replace(/([?&#]gid=)\d+/g, "$1" + cleanGid);
+        }
+
+        if (text.indexOf("#") !== -1) {
+            return text + "&gid=" + cleanGid;
+        }
+
+        return text + (text.indexOf("?") === -1 ? "?" : "&") + "gid=" + cleanGid;
+    }
+
     function buildPath(folder, filename) {
         return folder.fsName + (isWindows ? "\\" : "/") + filename;
     }
@@ -74,6 +104,7 @@
     function loadSettings() {
         var defaults = {
             sheetUrl: REFERENCE_SHEET_URL,
+            sheetGid: "0",
             nameField: "ФИО спикера",
             positionField: "Должность",
             photoField: "Фото на плашку",
@@ -83,8 +114,15 @@
             nameLayerIndex: "3",
             positionLayer: "ДОЛЖНОСТЬ",
             positionLayerIndex: "4",
+            graphicType: "Плашка",
             photoLayer: "Rectangle 3",
             photoLayerIndex: "6",
+            photoContentLayer: "",
+            photoContentLayerIndex: "",
+            photoCompPrefix: "PHOTO",
+            requirePhotoPrecomp: false,
+            autoImportPhotos: true,
+            recreateExistingComps: false,
             compPrefix: "Плашка",
             delimiter: "_",
             photoFolderPath: "",
@@ -102,12 +140,12 @@
             for (var key in defaults) {
                 if (!data.hasOwnProperty(key)) data[key] = defaults[key];
             }
-            // The source is always the "Справочник" sheet (gid=0), not a URL
-            // that might have been saved by a previous run.
-            data.sheetUrl = REFERENCE_SHEET_URL;
+            if (!data.sheetUrl) data.sheetUrl = defaults.sheetUrl;
+            if (!data.sheetGid) data.sheetGid = extractGoogleSheetGid(data.sheetUrl);
             if (data.nameField === "ИМЯ ФАМИЛИЯ") data.nameField = defaults.nameField;
             if (data.positionField === "ДОЛЖНОСТЬ") data.positionField = defaults.positionField;
             if (normalizeKey(data.photoField) === normalizeKey("фото на плашку")) data.photoField = defaults.photoField;
+            if (data.graphicType !== "Визитка" && data.graphicType !== "Плашка") data.graphicType = defaults.graphicType;
             return data;
         } catch (e) {
             return defaults;
@@ -145,7 +183,7 @@
         return folder;
     }
 
-    function buildPythonCommand(pythonCmd, sheetUrl, jsonPath, photosPath, photoField, nameField) {
+    function buildPythonCommand(pythonCmd, sheetUrl, jsonPath, photosPath, photoField, nameField, autoImportPhotos) {
         var pyScript = new File(PYTHON_SCRIPT_PATH);
         var parts = [
             quoteExecutable(pythonCmd),
@@ -154,7 +192,8 @@
             quoteShellArg(jsonPath),
             quoteShellArg(photosPath),
             quoteShellArg(photoField),
-            quoteShellArg(nameField)
+            quoteShellArg(nameField),
+            autoImportPhotos ? "1" : "0"
         ];
         var inner = parts.join(" ") + " 2>&1";
         if (isWindows) return "cmd /c " + inner;
@@ -312,6 +351,65 @@
         return cleanPlateText(result);
     }
 
+    function titleCaseNamePart(value) {
+        var text = cleanPlateText(value).toLowerCase();
+        if (text === "") return text;
+
+        var chunks = text.split("-");
+        for (var i = 0; i < chunks.length; i++) {
+            if (chunks[i].length > 0) {
+                chunks[i] = chunks[i].charAt(0).toUpperCase() + chunks[i].substring(1);
+            }
+        }
+        return chunks.join("-");
+    }
+
+    function compPersonNameText(value) {
+        var text = safeCompText(value, "_").replace(/\([^)]*\)/g, " ");
+        text = cleanPlateText(text);
+        if (text === "") return "Без имени";
+
+        var rawParts = text.split(/\s+/);
+        var parts = [];
+        for (var i = 0; i < rawParts.length; i++) {
+            var part = rawParts[i].replace(/^[,;:()\[\]{}"']+|[,;:()\[\]{}"']+$/g, "");
+            if (part === "" || isRegaliaToken(part)) continue;
+            parts.push(part);
+            if (parts.length >= 2) break;
+        }
+
+        if (parts.length >= 2) {
+            return titleCaseNamePart(parts[1]) + " " + titleCaseNamePart(parts[0]);
+        }
+        return titleCaseNamePart(parts[0] || text);
+    }
+
+    function buildOutputCompName(settings, name) {
+        var prefix = cleanPlateText(settings.compPrefix) || "Визитка";
+        var delimiter = settings.delimiter || "_";
+        return prefix + delimiter + compPersonNameText(name);
+    }
+
+    function findCompsByNameInFolder(name, folder, exceptComp) {
+        var matches = [];
+        var wanted = cleanPlateText(name);
+        for (var i = 1; i <= app.project.numItems; i++) {
+            var item = app.project.item(i);
+            if (item instanceof CompItem && item.name === wanted && item.parentFolder === folder && item !== exceptComp) {
+                matches.push(item);
+            }
+        }
+        return matches;
+    }
+
+    function removeComps(items) {
+        for (var i = items.length - 1; i >= 0; i--) {
+            try {
+                items[i].remove();
+            } catch (removeError) {}
+        }
+    }
+
     function normalizeFilterText(value) {
         return cleanPlateText(value).replace(/ё/g, "е").toLowerCase();
     }
@@ -332,6 +430,8 @@
     function rowMatchesShiftFilter(row, settings) {
         var filterValues = splitFilterValues(settings.shiftFilter);
         if (filterValues.length === 0) return true;
+
+        if (cleanPlateText(settings.shiftField) === "") return true;
 
         var shiftValue = getByColumn(row, settings.shiftField);
         var shiftTokens = splitFilterValues(shiftValue);
@@ -358,6 +458,13 @@
             }
         }
 
+        var commonNames = ["PHOTO", "PHOTO_TEMPLATE", "Rectangle 3"];
+        for (var c = 0; c < commonNames.length; c++) {
+            for (var n = 1; n <= comp.numLayers; n++) {
+                if (comp.layer(n).name === commonNames[c]) return comp.layer(n);
+            }
+        }
+
         var index = parseInt(layerIndexText, 10);
         if (!isNaN(index) && index >= 1 && index <= comp.numLayers) return comp.layer(index);
         return null;
@@ -372,8 +479,18 @@
         return (typeof JSON !== "undefined" && JSON.parse) ? JSON.parse(text) : eval("(" + text + ")");
     }
 
+    function decodeUriPath(value) {
+        var text = String(value || "");
+        if (text.indexOf("%") === -1) return text;
+        try {
+            return decodeURI(text);
+        } catch (e) {
+            return text;
+        }
+    }
+
     function importFootage(filePath) {
-        var file = new File(filePath);
+        var file = new File(decodeUriPath(filePath));
         if (!file.exists) throw new Error("Файл фото не найден: " + filePath);
         var options = new ImportOptions(file);
         options.importAs = ImportAsType.FOOTAGE;
@@ -431,12 +548,60 @@
         } catch (e) {}
     }
 
-    function findReplaceablePhotoContentLayer(photoComp) {
+    function isReplaceablePhotoLayer(layer) {
+        try {
+            return layer && layer.source && !(layer.source instanceof CompItem);
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function isFilePhotoLayer(layer) {
+        try {
+            return isReplaceablePhotoLayer(layer) && layer.source.mainSource && layer.source.mainSource.file;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function isPrecompLayer(layer) {
+        try {
+            return layer && layer.source && layer.source instanceof CompItem;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function findLayerByName(comp, layerName) {
+        for (var i = 1; i <= comp.numLayers; i++) {
+            if (comp.layer(i).name === layerName) return comp.layer(i);
+        }
+        return null;
+    }
+
+    function findReplaceablePhotoContentLayer(photoComp, layerName, layerIndexText) {
+        var wantedName = trimText(layerName);
+        if (wantedName !== "") {
+            for (var n = 1; n <= photoComp.numLayers; n++) {
+                var namedLayer = photoComp.layer(n);
+                if (namedLayer.name === wantedName && isReplaceablePhotoLayer(namedLayer)) return namedLayer;
+            }
+        }
+
+        var index = parseInt(layerIndexText, 10);
+        if (!isNaN(index) && index >= 1 && index <= photoComp.numLayers) {
+            var indexedLayer = photoComp.layer(index);
+            if (isReplaceablePhotoLayer(indexedLayer)) return indexedLayer;
+        }
+
+        for (var p = 1; p <= photoComp.numLayers; p++) {
+            var photoLayer = photoComp.layer(p);
+            if (isFilePhotoLayer(photoLayer)) return photoLayer;
+        }
+
         for (var i = 1; i <= photoComp.numLayers; i++) {
             var layer = photoComp.layer(i);
-            try {
-                if (layer.source && !(layer.source instanceof CompItem)) return layer;
-            } catch (e1) {}
+            if (isReplaceablePhotoLayer(layer)) return layer;
         }
 
         for (var j = 1; j <= photoComp.numLayers; j++) {
@@ -449,16 +614,61 @@
         return null;
     }
 
-    function replacePhotoInPrecomp(photoComp, footage, fitToPlaceholder) {
-        var contentLayer = findReplaceablePhotoContentLayer(photoComp);
+    function getCompSize(comp) {
+        return { width: comp.width, height: comp.height };
+    }
+
+    function replacePhotoInPrecomp(photoComp, footage, settings) {
+        var nestedPhoto = findLayerByName(photoComp, "PHOTO");
+        if (nestedPhoto && isReplaceablePhotoLayer(nestedPhoto)) {
+            var nestedTargetSize = getLayerVisualSize(nestedPhoto);
+            nestedPhoto.replaceSource(footage, false);
+            if (settings.fitPhotoToPlaceholder) fitFootageToSize(nestedPhoto, footage, nestedTargetSize);
+            return true;
+        }
+
+        if (nestedPhoto && isPrecompLayer(nestedPhoto)) {
+            var nestedComp = nestedPhoto.source.duplicate();
+            nestedComp.name = photoComp.name + "_INNER";
+            nestedPhoto.replaceSource(nestedComp, false);
+            return replacePhotoInPrecomp(nestedComp, footage, settings);
+        }
+
+        var contentLayer = findReplaceablePhotoContentLayer(photoComp, settings.photoContentLayer, settings.photoContentLayerIndex);
         if (!contentLayer) {
-            photoComp.layers.add(footage);
+            var addedLayer = photoComp.layers.add(footage);
+            if (settings.fitPhotoToPlaceholder) fitFootageToSize(addedLayer, footage, getCompSize(photoComp));
             return true;
         }
 
         var targetSize = getLayerVisualSize(contentLayer);
         contentLayer.replaceSource(footage, false);
-        if (fitToPlaceholder) fitFootageToSize(contentLayer, footage, targetSize);
+        if (settings.fitPhotoToPlaceholder) fitFootageToSize(contentLayer, footage, targetSize);
+        return true;
+    }
+
+    function isBusinessCardMode(settings) {
+        return settings.graphicType === "Визитка" || settings.requirePhotoPrecomp === true;
+    }
+
+    function duplicatePhotoPrecompOnly(comp, settings, plateNumber, plateName) {
+        var layer = findPhotoLayer(comp, settings.photoLayer, settings.photoLayerIndex);
+        if (!layer) throw new Error("В композиции \"" + comp.name + "\" не найден слой фото. Переименуйте внешний фото-прекомп в PHOTO или PHOTO_TEMPLATE.");
+
+        var sourceComp = null;
+        try {
+            if (layer.source && layer.source instanceof CompItem) sourceComp = layer.source;
+        } catch (sourceError) {}
+
+        if (!sourceComp) {
+            if (isBusinessCardMode(settings)) throw new Error("В режиме \"Визитка\" слой фото должен быть прекомпом.");
+            return false;
+        }
+
+        var photoComp = sourceComp.duplicate();
+        var photoPrefix = cleanPlateText(settings.photoCompPrefix) || "PHOTO";
+        photoComp.name = safeCompText(photoPrefix, "_") + "_" + safeCompText(plateName, "_");
+        layer.replaceSource(photoComp, false);
         return true;
     }
 
@@ -466,20 +676,28 @@
         if (!photoPath) return false;
 
         var layer = findPhotoLayer(comp, settings.photoLayer, settings.photoLayerIndex);
-        if (!layer) throw new Error("В композиции \"" + comp.name + "\" не найден слой фото \"" + settings.photoLayer + "\" или слой N" + settings.photoLayerIndex + ".");
+        if (!layer) throw new Error("В композиции \"" + comp.name + "\" не найден слой фото. Переименуйте внешний фото-прекомп в PHOTO или PHOTO_TEMPLATE.");
 
         var targetSize = getLayerVisualSize(layer);
         var footage = importFootage(photoPath);
+        var sourceComp = null;
 
         try {
-            if (layer.source && layer.source instanceof CompItem) {
-                var photoComp = layer.source.duplicate();
-                photoComp.name = safeCompText(settings.photoLayer, "_") + "_" + plateNumber + "_" + safeCompText(plateName, "_");
-                layer.replaceSource(photoComp, false);
-                replacePhotoInPrecomp(photoComp, footage, settings.fitPhotoToPlaceholder);
-                return true;
-            }
-        } catch (precompError) {}
+            if (layer.source && layer.source instanceof CompItem) sourceComp = layer.source;
+        } catch (sourceError) {}
+
+        if (sourceComp) {
+            var photoComp = sourceComp.duplicate();
+            var photoPrefix = cleanPlateText(settings.photoCompPrefix) || "PHOTO";
+            photoComp.name = safeCompText(photoPrefix, "_") + "_" + safeCompText(plateName, "_");
+            layer.replaceSource(photoComp, false);
+            replacePhotoInPrecomp(photoComp, footage, settings);
+            return true;
+        }
+
+        if (isBusinessCardMode(settings)) {
+            throw new Error("В режиме \"Визитка\" слой фото \"" + settings.photoLayer + "\" должен быть прекомпом. Сейчас он не выглядит как CompItem.");
+        }
 
         if (layer.replaceSource) {
             layer.replaceSource(footage, false);
@@ -493,6 +711,22 @@
         try { newLayer.moveBefore(layer); } catch (e1) {}
         layer.enabled = false;
         return true;
+    }
+
+    function validateTemplate(masterComp, settings) {
+        var warnings = [];
+        if (!findTextLayer(masterComp, settings.nameLayer, settings.nameLayerIndex)) {
+            warnings.push("В шаблоне \"" + masterComp.name + "\" не найден текстовый слой имени.");
+        }
+
+        if (!findTextLayer(masterComp, settings.positionLayer, settings.positionLayerIndex)) {
+            warnings.push("В шаблоне \"" + masterComp.name + "\" не найден текстовый слой должности.");
+        }
+
+        if (isBusinessCardMode(settings) && !findPhotoLayer(masterComp, settings.photoLayer, settings.photoLayerIndex)) {
+            warnings.push("В шаблоне \"" + masterComp.name + "\" не найден фото-прекомп PHOTO_TEMPLATE или PHOTO.");
+        }
+        return warnings;
     }
 
     function addLabeledEdit(parent, label, value, labelWidth, editWidth) {
@@ -541,7 +775,7 @@
 
         var settings = loadSettings();
         var runtime = loadRuntimeConfig();
-        var win = new Window("palette", "Плашки: имя, должность, фото", undefined, { resizeable: true });
+        var win = new Window("palette", "Плашки и визитки: имя, должность, фото", undefined, { resizeable: true });
         win.orientation = "column";
         win.alignChildren = ["fill", "top"];
         win.margins = 10;
@@ -549,7 +783,7 @@
 
         var tabs = win.add("tabbedpanel");
         tabs.alignChildren = ["fill", "top"];
-        tabs.preferredSize = [520, 300];
+        tabs.preferredSize = [560, 360];
 
         var dataTab = tabs.add("tab", undefined, "Данные");
         dataTab.orientation = "column";
@@ -557,14 +791,26 @@
         dataTab.margins = 10;
         dataTab.spacing = 6;
 
-        dataTab.add("statictext", undefined, "Источник: Справочник (лист gid=0)");
-        var sourceUrlText = dataTab.add("statictext", undefined, REFERENCE_SHEET_URL);
-        sourceUrlText.characters = 62;
+        var edtSheetUrl = addLabeledEdit(dataTab, "Ссылка на таблицу:", settings.sheetUrl, 150, 330);
+        var sheetRow = dataTab.add("group");
+        sheetRow.orientation = "row";
+        sheetRow.alignChildren = ["left", "center"];
+        sheetRow.spacing = 8;
+        var sheetGidLabel = sheetRow.add("statictext", undefined, "GID листа:");
+        sheetGidLabel.preferredSize.width = 150;
+        var edtSheetGid = sheetRow.add("edittext", undefined, settings.sheetGid || extractGoogleSheetGid(settings.sheetUrl));
+        edtSheetGid.preferredSize.width = 110;
+        var btnReadGid = sheetRow.add("button", undefined, "Взять из ссылки");
+        btnReadGid.preferredSize.width = 120;
+        var btnApplyGid = sheetRow.add("button", undefined, "Применить");
+        btnApplyGid.preferredSize.width = 100;
 
         var edtNameField = addLabeledEdit(dataTab, "Колонка имени:", settings.nameField, 150, 300);
         var edtPosField = addLabeledEdit(dataTab, "Колонка должности:", settings.positionField, 150, 300);
         var edtPhotoField = addLabeledEdit(dataTab, "Колонка фото:", settings.photoField, 150, 300);
         var edtPhotoFolder = addFolderPicker(dataTab, "Папка фото:", settings.photoFolderPath || getDefaultPhotosFolder().fsName, 150, 250);
+        var chkAutoImportPhotos = dataTab.add("checkbox", undefined, "Подтягивать фото автоматически");
+        chkAutoImportPhotos.value = settings.autoImportPhotos !== false;
         var edtShiftField = addLabeledEdit(dataTab, "Колонка смены:", settings.shiftField, 150, 300);
         var edtShiftFilter = addLabeledEdit(dataTab, "Выгрузить смены:", settings.shiftFilter, 150, 300);
 
@@ -587,13 +833,44 @@
         createTab.margins = 10;
         createTab.spacing = 8;
 
-        var edtPrefix = addLabeledEdit(createTab, "Префикс композиций:", settings.compPrefix, 170, 180);
+        var typeRow = createTab.add("group");
+        typeRow.orientation = "row";
+        typeRow.alignChildren = ["left", "center"];
+        typeRow.spacing = 8;
+        var typeLabel = typeRow.add("statictext", undefined, "Тип графики:");
+        typeLabel.preferredSize.width = 170;
+        var ddlGraphicType = typeRow.add("dropdownlist", undefined, ["Плашка", "Визитка"]);
+        ddlGraphicType.selection = settings.graphicType === "Визитка" ? 1 : 0;
+        ddlGraphicType.preferredSize.width = 180;
+
+        var initialCompPrefix = settings.graphicType === "Визитка" && settings.compPrefix === "Плашка" ? "Визитка" : settings.compPrefix;
+        var initialPhotoLayer = settings.graphicType === "Визитка" && settings.photoLayer === "Rectangle 3" ? "PHOTO" : settings.photoLayer;
+        edtPhotoLayer.text = initialPhotoLayer;
+
+        var edtPrefix = addLabeledEdit(createTab, "Префикс композиций:", initialCompPrefix, 170, 180);
         var edtDelimiter = addLabeledEdit(createTab, "Разделитель:", settings.delimiter, 170, 80);
         var chkFit = createTab.add("checkbox", undefined, "Заполнять фото по размеру плейсхолдера");
         chkFit.value = settings.fitPhotoToPlaceholder;
+        var chkRecreate = createTab.add("checkbox", undefined, "Пересоздать уже созданные композиции");
+        chkRecreate.value = settings.recreateExistingComps === true;
         var chkRender = createTab.add("checkbox", undefined, "Добавить созданные композиции в Render Queue");
         chkRender.value = settings.addToRenderQueue;
         tabs.selection = dataTab;
+
+        btnReadGid.onClick = function() {
+            edtSheetGid.text = extractGoogleSheetGid(edtSheetUrl.text);
+        };
+
+        btnApplyGid.onClick = function() {
+            edtSheetUrl.text = applyGoogleSheetGid(edtSheetUrl.text, edtSheetGid.text);
+        };
+
+        ddlGraphicType.onChange = function() {
+            if (ddlGraphicType.selection && ddlGraphicType.selection.text === "Визитка") {
+                if (trimText(edtPrefix.text) === "" || edtPrefix.text === "Плашка") edtPrefix.text = "Визитка";
+                if (trimText(edtPhotoLayer.text) === "" || edtPhotoLayer.text === "Rectangle 3") edtPhotoLayer.text = "PHOTO";
+            }
+        };
 
         var buttons = win.add("group");
         buttons.orientation = "row";
@@ -606,7 +883,8 @@
         btnCreate.preferredSize.width = 160;
 
         function collectSettings() {
-            settings.sheetUrl = REFERENCE_SHEET_URL;
+            settings.sheetGid = trimText(edtSheetGid.text) || extractGoogleSheetGid(edtSheetUrl.text);
+            settings.sheetUrl = applyGoogleSheetGid(edtSheetUrl.text, settings.sheetGid);
             settings.nameField = edtNameField.text;
             settings.positionField = edtPosField.text;
             settings.photoField = edtPhotoField.text;
@@ -618,10 +896,17 @@
             settings.positionLayerIndex = edtPosIndex.text;
             settings.photoLayer = edtPhotoLayer.text;
             settings.photoLayerIndex = edtPhotoIndex.text;
+            settings.graphicType = ddlGraphicType.selection ? ddlGraphicType.selection.text : "Плашка";
+            settings.photoContentLayer = "";
+            settings.photoContentLayerIndex = "";
             settings.compPrefix = edtPrefix.text;
+            settings.photoCompPrefix = "PHOTO";
             settings.delimiter = edtDelimiter.text;
             settings.photoFolderPath = edtPhotoFolder.text;
+            settings.autoImportPhotos = chkAutoImportPhotos.value;
+            settings.requirePhotoPrecomp = settings.graphicType === "Визитка";
             settings.fitPhotoToPlaceholder = chkFit.value;
+            settings.recreateExistingComps = chkRecreate.value;
             settings.addToRenderQueue = chkRender.value;
             return settings;
         }
@@ -655,10 +940,11 @@
         var cmd = buildPythonCommand(
             runtime.pythonCmd,
             settings.sheetUrl,
-            jsonFile.fsName,
-            photosFolder.fsName,
+            jsonFile.absoluteURI || jsonFile.fsName,
+            photosFolder.absoluteURI || photosFolder.fsName,
             settings.photoField,
-            settings.nameField
+            settings.nameField,
+            settings.autoImportPhotos !== false
         );
         var output = system.callSystem(cmd);
         $.sleep(500);
@@ -696,7 +982,15 @@
             report += "Под фильтр смены: " + matchedShift + "\n";
             report += "С именем: " + withName + "\n";
             report += "С должностью: " + withPosition + "\n";
-            report += "Фото скачано: " + withPhoto + "\n\n";
+            if (settings.autoImportPhotos === false) {
+                report += "Фото: автоматическое подтягивание выключено\n\n";
+            } else {
+                report += "Фото готово: " + withPhoto + "\n\n";
+            }
+            if (settings.autoImportPhotos !== false && withPhoto === 0) {
+                report += "Фото не найдены. Проверьте, что ссылки лежат в одной из колонок: " + settings.photoField + ", Ссылка на плашку, Фото на плашку, ФОТО, Фото.\n";
+                report += "Если фото лежат на диске, проверьте выбранную папку фото.\n\n";
+            }
             if (examples.length > 0) report += "Примеры:\n" + examples.join("\n") + "\n\n";
             if (errors.length > 0) report += "Первые ошибки фото:\n" + errors.join("\n") + "\n\n";
             report += "Вывод Python:\n" + result.output;
@@ -709,6 +1003,8 @@
     function generatePlates(masterComp, settings, runtime) {
         app.beginUndoGroup("Person Plates from Sheet");
         try {
+            var templateWarnings = validateTemplate(masterComp, settings);
+
             var result = downloadData(settings, runtime);
             var rows = result.rows;
             if (!rows || rows.length === 0) throw new Error("Данные пусты.");
@@ -716,9 +1012,13 @@
             var targetFolder = masterComp.parentFolder || app.project.rootFolder;
             var created = 0;
             var skipped = 0;
+            var skippedExisting = 0;
+            var recreated = 0;
             var noPhoto = 0;
             var skippedByShift = 0;
-            var delimiter = settings.delimiter || "_";
+            var textErrors = [];
+            var photoErrors = [];
+            var namesCreatedThisRun = {};
 
             for (var i = 0; i < rows.length; i++) {
                 var row = normalizeRow(rows[i]);
@@ -736,16 +1036,54 @@
                     continue;
                 }
 
+                var compName = buildOutputCompName(settings, name);
+                if (namesCreatedThisRun[compName] === true) {
+                    skippedExisting++;
+                    continue;
+                }
+
+                var existingComps = findCompsByNameInFolder(compName, targetFolder, masterComp);
+                if (existingComps.length > 0) {
+                    if (settings.recreateExistingComps === true) {
+                        removeComps(existingComps);
+                        recreated += existingComps.length;
+                    } else {
+                        skippedExisting++;
+                        continue;
+                    }
+                }
+
                 var comp = masterComp.duplicate();
                 comp.parentFolder = targetFolder;
                 var plateNumber = ("000" + (created + 1)).slice(-3);
-                comp.name = (settings.compPrefix || "Плашка") + delimiter + plateNumber + delimiter + shortCompNameText(name, delimiter);
+                comp.name = compName;
 
-                setTextLayer(comp, settings.nameLayer, settings.nameLayerIndex, name);
-                setTextLayer(comp, settings.positionLayer, settings.positionLayerIndex, position);
+                try {
+                    setTextLayer(comp, settings.nameLayer, settings.nameLayerIndex, name);
+                } catch (nameTextError) {
+                    if (textErrors.length < 8) textErrors.push(name + ": не записано имя (" + nameTextError.toString() + ")");
+                }
 
-                if (photoPath !== "") {
-                    replacePhotoLayer(comp, settings, photoPath, plateNumber, name);
+                try {
+                    setTextLayer(comp, settings.positionLayer, settings.positionLayerIndex, position);
+                } catch (positionTextError) {
+                    if (textErrors.length < 8) textErrors.push(name + ": не записана должность (" + positionTextError.toString() + ")");
+                }
+
+                if (settings.autoImportPhotos === false && isBusinessCardMode(settings)) {
+                    try {
+                        duplicatePhotoPrecompOnly(comp, settings, plateNumber, name);
+                    } catch (manualPhotoError) {
+                        if (photoErrors.length < 8) photoErrors.push(name + ": " + manualPhotoError.toString());
+                    }
+                    noPhoto++;
+                } else if (photoPath !== "") {
+                    try {
+                        replacePhotoLayer(comp, settings, photoPath, plateNumber, name);
+                    } catch (photoError) {
+                        noPhoto++;
+                        if (photoErrors.length < 8) photoErrors.push(name + ": " + photoError.toString());
+                    }
                 } else {
                     noPhoto++;
                 }
@@ -753,16 +1091,22 @@
                 if (settings.addToRenderQueue) {
                     app.project.renderQueue.items.add(comp);
                 }
+                namesCreatedThisRun[compName] = true;
                 created++;
             }
 
             alert(
                 "Готово.\n\n" +
                 "Создано композиций: " + created + "\n" +
+                "Пересоздано старых композиций: " + recreated + "\n" +
+                "Уже были, оставлены без изменений: " + skippedExisting + "\n" +
                 "Пропущено строк: " + skipped + "\n" +
                 "Пропущено по смене: " + skippedByShift + "\n" +
-                "Без фото: " + noPhoto + "\n" +
+                (settings.autoImportPhotos === false ? "Фото: автоматическое подтягивание выключено\n" : "Без фото: " + noPhoto + "\n") +
                 "Всего строк: " + rows.length + "\n\n" +
+                (templateWarnings.length > 0 ? "Предупреждения шаблона:\n" + templateWarnings.join("\n") + "\n\n" : "") +
+                (textErrors.length > 0 ? "Ошибки текста, композиции оставлены как есть:\n" + textErrors.join("\n") + "\n\n" : "") +
+                (photoErrors.length > 0 ? "Ошибки фото, композиции созданы без фото:\n" + photoErrors.join("\n") + "\n\n" : "") +
                 "Фото лежат здесь:\n" + getPhotosFolder(settings).fsName,
                 SCRIPT_NAME
             );
