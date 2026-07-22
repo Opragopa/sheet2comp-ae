@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import argparse
 import sys
+import re
 from pathlib import Path
 
 from download_person_plate_data import download_and_prepare
@@ -14,9 +15,22 @@ PHOTO_FIELD = "Фото на плашку"
 NAME_FIELD = "ФИО спикера"
 
 
+def apply_google_sheet_gid(url, gid):
+    text = str(url or "").strip()
+    if "docs.google.com/spreadsheets" not in text:
+        return text
+
+    clean_gid = re.sub(r"[^\d]", "", str(gid or "").strip()) or "0"
+    if re.search(r"[?&#]gid=\d+", text):
+        return re.sub(r"([?&#]gid=)\d+", r"\g<1>{}".format(clean_gid), text)
+    if "#" in text:
+        return "{}&gid={}".format(text, clean_gid)
+    return "{}{}gid={}".format(text, "?" if "?" not in text else "&", clean_gid)
+
+
 def parse_args(argv):
     parser = argparse.ArgumentParser(
-        description="Скачать и переименовать фото для плашек из листа Справочник."
+        description="Скачать и переименовать фото для плашек/визиток из Google Sheets."
     )
     parser.add_argument(
         "legacy_photos_dir",
@@ -38,6 +52,23 @@ def parse_args(argv):
         "--json-path",
         help="Куда сохранить JSON для After Effects.",
     )
+    parser.add_argument(
+        "-s",
+        "--sheet-url",
+        default=REFERENCE_SHEET_URL,
+        help="Ссылка на Google Sheet или локальный CSV/TSV/TXT.",
+    )
+    parser.add_argument(
+        "-g",
+        "--sheet-gid",
+        default="0",
+        help="GID листа Google Sheets. Если в ссылке уже есть gid, он будет заменен.",
+    )
+    parser.add_argument(
+        "--no-photos",
+        action="store_true",
+        help="Не скачивать и не искать фото, только подготовить JSON с текстовыми данными.",
+    )
     return parser.parse_args(argv[1:])
 
 
@@ -47,13 +78,15 @@ def main(argv):
     json_path = Path(args.json_path or args.legacy_json_path or DEFAULT_JSON).expanduser()
     photos_dir.mkdir(parents=True, exist_ok=True)
     json_path.parent.mkdir(parents=True, exist_ok=True)
+    sheet_url = apply_google_sheet_gid(args.sheet_url, args.sheet_gid)
 
     return download_and_prepare(
-        REFERENCE_SHEET_URL,
+        sheet_url,
         str(json_path),
         str(photos_dir),
         PHOTO_FIELD,
         NAME_FIELD,
+        not args.no_photos,
     )
 
 

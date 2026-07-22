@@ -33,7 +33,9 @@ function loadSettings() {
         nameLayer: "ИМЯ",
         positionLayer: "РЕГАЛИИ",
         delimiter: "_",
-        compPrefix: "Плашка"
+        compPrefix: "Плашка",
+        dataMode: "Таблица",
+        manualPlatesText: ""
     };
     
     if (SETTINGS_FILE.exists) {
@@ -449,6 +451,126 @@ function getDataJsonFile() {
     return new File(buildPath(DATA_FOLDER, JSON_FILE_NAME));
 }
 
+function cleanManualValue(value) {
+    return trimText(String(value || "").replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " "));
+}
+
+function splitManualLine(line) {
+    var text = trimText(line);
+    if (text.indexOf("|") !== -1) return text.split("|");
+    if (text.indexOf(";") !== -1) return text.split(";");
+    if (text.indexOf("\t") !== -1) return text.split("\t");
+    return [text];
+}
+
+function normalizeManualHeader(value) {
+    return trimText(value || "").toLowerCase().replace(/ё/g, "е").replace(/\s+/g, " ");
+}
+
+function isManualHeaderLine(parts) {
+    if (!parts || parts.length === 0) return false;
+    var first = normalizeManualHeader(parts[0]);
+    if (first !== "фио" && first !== "фио спикера" && first !== "имя" && first !== "имя фамилия") return false;
+    if (parts.length === 1) return true;
+    var second = normalizeManualHeader(parts[1]);
+    return second === "" || second === "должность" || second === "регалии";
+}
+
+function parseManualPlates(text, settings) {
+    var lines = String(text || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+    var rows = [];
+    var nameField = trimText(settings.nameField) || "ФИО спикера";
+    var positionField = trimText(settings.positionField) || "Должность";
+
+    for (var i = 0; i < lines.length; i++) {
+        var line = trimText(lines[i]);
+        if (line === "") continue;
+
+        var parts = splitManualLine(line);
+        for (var p = 0; p < parts.length; p++) {
+            parts[p] = cleanManualValue(parts[p]);
+        }
+        if (rows.length === 0 && isManualHeaderLine(parts)) continue;
+
+        if ((parts[0] || "") === "") continue;
+
+        var row = {};
+        row[nameField] = parts[0] || "";
+        row[positionField] = parts.length > 1 ? parts[1] : "";
+        rows.push(row);
+    }
+
+    if (rows.length === 0) {
+        throw new Error("Ручной список пуст. Добавьте хотя бы одну строку: Имя Фамилия | Должность");
+    }
+
+    return rows;
+}
+
+function readDataJson(jsonFile) {
+    var dataArray = [];
+    if (jsonFile.open("r")) {
+        jsonFile.encoding = "UTF-8";
+        var jsonData = jsonFile.read();
+        jsonFile.close();
+
+        if (typeof JSON !== "undefined" && JSON.parse) {
+            dataArray = JSON.parse(jsonData);
+        } else {
+            dataArray = eval("(" + jsonData + ")");
+        }
+    }
+    return dataArray;
+}
+
+function normalizeRows(dataArray) {
+    var cleanData = [];
+    for (var i = 0; i < dataArray.length; i++) {
+        var row = dataArray[i];
+        var cleanRow = {};
+        for (var key in row) {
+            if (row.hasOwnProperty(key)) {
+                var cleanKey = trimText(key);
+                var cleanValue = row[key] ? trimText(row[key]) : "";
+                cleanRow[cleanKey] = cleanValue;
+            }
+        }
+        cleanData.push(cleanRow);
+    }
+    return cleanData;
+}
+
+function loadDataRows(settings) {
+    if (settings.dataMode === "Вручную") {
+        return parseManualPlates(settings.manualPlatesText, settings);
+    }
+
+    var pyScriptFile = new File(PYTHON_SCRIPT_PATH);
+    if (!pyScriptFile.exists) {
+        throw new Error("Python-скрипт не найден:\n" + PYTHON_SCRIPT_PATH + "\n\nОтредактируйте путь в начале скрипта.");
+    }
+
+    var jsonFile = getDataJsonFile();
+    if (jsonFile.exists) {
+        jsonFile.remove();
+    }
+
+    var cmd = buildPythonCommand(PYTHON_CMD, pyScriptFile.fsName, settings.csvUrl, jsonFile.fsName);
+    var cmdResult = system.callSystem(cmd);
+
+    $.sleep(1000);
+
+    if (!jsonFile.exists) {
+        throw new Error("Файл data.json не создан.\n\nВывод:\n" + cmdResult);
+    }
+
+    try {
+        return readDataJson(jsonFile);
+    } catch (e) {
+        throw new Error("Ошибка JSON:\n" + e.toString());
+    }
+}
+
 // Сформировать команду для вызова Python
 function buildPythonCommand(pythonPath, scriptPath, csvUrl, jsonPath) {
     if (isWindows) {
@@ -484,12 +606,19 @@ function main() {
     win.margins = 15;
     win.spacing = 10;
 
-    // ГРУППА: Ссылка на таблицу
-    var grpUrl = win.add("panel", undefined, "📊 Google Таблица");
+    // ГРУППА: Источник данных
+    var grpUrl = win.add("panel", undefined, "📊 Источник данных");
     grpUrl.orientation = "column";
     grpUrl.alignChildren = ["fill", "top"];
     grpUrl.margins = 10;
     grpUrl.spacing = 5;
+
+    var modeGroup = grpUrl.add("group");
+    modeGroup.orientation = "row";
+    modeGroup.alignChildren = ["left", "center"];
+    modeGroup.add("statictext", undefined, "Источник:");
+    var ddlDataMode = modeGroup.add("dropdownlist", undefined, ["Таблица", "Вручную"]);
+    ddlDataMode.selection = settings.dataMode === "Вручную" ? 1 : 0;
 
     var lblUrl = grpUrl.add("statictext", undefined, "Ссылка на CSV:");
     var edtUrl = grpUrl.add("edittext", undefined, settings.csvUrl);
@@ -509,6 +638,25 @@ function main() {
             alert("❌ Не удалось распознать ссылку.", "Генератор плашек");
         }
     };
+
+    var manualLabel = grpUrl.add("statictext", undefined, "Ручной список: одна строка = одна плашка");
+    var manualText = grpUrl.add("edittext", undefined, settings.manualPlatesText || "", {multiline: true, scrolling: true});
+    manualText.preferredSize.height = 120;
+    var manualHint = grpUrl.add("statictext", undefined, "Формат: Имя Фамилия | Должность. Также можно использовать ;");
+    manualHint.graphics.font = ScriptUI.newFont("dialog", "Italic", 10);
+
+    function updateSourceModeUi() {
+        var manualMode = ddlDataMode.selection && ddlDataMode.selection.text === "Вручную";
+        lblUrl.enabled = !manualMode;
+        edtUrl.enabled = !manualMode;
+        btnConvertUrl.enabled = !manualMode;
+        manualLabel.enabled = manualMode;
+        manualText.enabled = manualMode;
+        manualHint.enabled = manualMode;
+    }
+
+    ddlDataMode.onChange = updateSourceModeUi;
+    updateSourceModeUi();
 
     // ГРУППА: Названия полей
     var grpFields = win.add("panel", undefined, "🏷️ Названия полей");
@@ -560,6 +708,8 @@ function main() {
     // ОБРАБОТЧИКИ
     btnSave.onClick = function() {
         settings.csvUrl = edtUrl.text;
+        settings.dataMode = ddlDataMode.selection ? ddlDataMode.selection.text : "Таблица";
+        settings.manualPlatesText = manualText.text;
         settings.nameField = edtName.text;
         settings.positionField = edtPos.text;
         settings.nameLayer = edtNameLayer.text;
@@ -576,11 +726,18 @@ function main() {
 
     btnCheck.onClick = function() {
         var fieldsStr = edtName.text + ", " + edtPos.text;
-        checkData(edtUrl.text, fieldsStr);
+        settings.csvUrl = edtUrl.text;
+        settings.dataMode = ddlDataMode.selection ? ddlDataMode.selection.text : "Таблица";
+        settings.manualPlatesText = manualText.text;
+        settings.nameField = edtName.text;
+        settings.positionField = edtPos.text;
+        checkData(settings, fieldsStr);
     };
 
     btnGenerate.onClick = function() {
         settings.csvUrl = edtUrl.text;
+        settings.dataMode = ddlDataMode.selection ? ddlDataMode.selection.text : "Таблица";
+        settings.manualPlatesText = manualText.text;
         settings.nameField = edtName.text;
         settings.positionField = edtPos.text;
         settings.nameLayer = edtNameLayer.text;
@@ -612,7 +769,7 @@ function main() {
 // ПРОВЕРКА ДАННЫХ
 // =====================================================================
 
-function checkData(csvUrl, fieldsConfig) {
+function checkData(settings, fieldsConfig) {
     var progressWin = new Window("palette", "🔍 Проверка...", undefined, {resizeable: false});
     progressWin.orientation = "column";
     progressWin.alignChildren = ["fill", "top"];
@@ -626,72 +783,18 @@ function checkData(csvUrl, fieldsConfig) {
     progressWin.show();
     
     try {
-        var pyScriptFile = new File(PYTHON_SCRIPT_PATH);
-        if (!pyScriptFile.exists) {
-            alert("❌ Python-скрипт не найден:\n" + PYTHON_SCRIPT_PATH + "\n\nОтредактируйте путь в начале скрипта.", "Проверка");
-            progressWin.close();
-            return;
-        }
-        
-        var jsonFile = getDataJsonFile();
-        
-        // Удалить старый JSON
-        if (jsonFile.exists) {
-            jsonFile.remove();
-        }
-        
         progressBar.value = 20;
-        progressText.text = "Запуск Python...";
-        
-        var cmd = buildPythonCommand(PYTHON_CMD, pyScriptFile.fsName, csvUrl, jsonFile.fsName);
-        var cmdResult = system.callSystem(cmd);
-        
-        $.sleep(1000);
+        progressText.text = settings.dataMode === "Вручную" ? "Разбор ручного списка..." : "Запуск Python...";
+
+        var dataArray = loadDataRows(settings);
+
         progressBar.value = 50;
         progressText.text = "Анализ...";
-        
-        if (!jsonFile.exists) {
-            alert("❌ Файл data.json не создан.\n\nВывод:\n" + cmdResult, "Проверка");
-            progressWin.close();
-            return;
-        }
-        
-        var dataArray = [];
-        if (jsonFile.open("r")) {
-            jsonFile.encoding = "UTF-8";
-            var jsonData = jsonFile.read();
-            jsonFile.close();
-            
-            try {
-                if (typeof JSON !== "undefined" && JSON.parse) {
-                    dataArray = JSON.parse(jsonData);
-                } else {
-                    dataArray = eval("(" + jsonData + ")");
-                }
-            } catch (e) {
-                alert("❌ Ошибка JSON:\n" + e.toString(), "Проверка");
-                progressWin.close();
-                return;
-            }
-        }
-        
+
         progressBar.value = 70;
         progressText.text = "Подсчёт...";
-        
-        // Нормализация
-        var cleanData = [];
-        for (var i = 0; i < dataArray.length; i++) {
-            var row = dataArray[i];
-            var cleanRow = {};
-            for (var key in row) {
-                if (row.hasOwnProperty(key)) {
-                    var cleanKey = trimText(key);
-                    var cleanValue = row[key] ? trimText(row[key]) : "";
-                    cleanRow[cleanKey] = cleanValue;
-                }
-            }
-            cleanData.push(cleanRow);
-        }
+
+        var cleanData = normalizeRows(dataArray);
         
         var rawFieldNames = fieldsConfig.split(",");
         var fieldNames = [];
@@ -730,6 +833,7 @@ function checkData(csvUrl, fieldsConfig) {
         
         var report = "📊 СТАТИСТИКА\n";
         report += "═══════════════════════\n\n";
+        report += "Источник: " + (settings.dataMode || "Таблица") + "\n";
         report += "Всего: " + totalRecords + "\n";
         report += "✅ ОК: " + validRecords + "\n";
         report += "❌ Ошибки: " + errorRecords + "\n";
@@ -788,66 +892,14 @@ function generatePlates(masterComp, settings) {
     app.beginUndoGroup("Создание плашек");
     
     try {
-        var pyScriptFile = new File(PYTHON_SCRIPT_PATH);
-        if (!pyScriptFile.exists) {
-            alert("❌ Python-скрипт не найден:\n" + PYTHON_SCRIPT_PATH + "\n\nОтредактируйте путь в начале скрипта.", "Генератор");
-            return;
-        }
-        
-        var jsonFile = getDataJsonFile();
-        
-        // Удалить старый JSON
-        if (jsonFile.exists) {
-            jsonFile.remove();
-        }
-        
-        var cmd = buildPythonCommand(PYTHON_CMD, pyScriptFile.fsName, settings.csvUrl, jsonFile.fsName);
-        var cmdResult = system.callSystem(cmd);
-        
-        $.sleep(1000);
-        
-        if (!jsonFile.exists) {
-            alert("❌ data.json не создан.\n\nВывод:\n" + cmdResult, "Генератор");
-            return;
-        }
-        
-        var dataArray = [];
-        if (jsonFile.open("r")) {
-            jsonFile.encoding = "UTF-8";
-            var jsonData = jsonFile.read();
-            jsonFile.close();
-            
-            try {
-                if (typeof JSON !== "undefined" && JSON.parse) {
-                    dataArray = JSON.parse(jsonData);
-                } else {
-                    dataArray = eval("(" + jsonData + ")");
-                }
-            } catch (e) {
-                alert("❌ Ошибка JSON:\n" + e.toString(), "Генератор");
-                return;
-            }
-        }
+        var dataArray = loadDataRows(settings);
         
         if (dataArray.length === 0) {
             alert("❌ Данные пусты.", "Генератор");
             return;
         }
         
-        // Нормализация
-        var cleanData = [];
-        for (var i = 0; i < dataArray.length; i++) {
-            var row = dataArray[i];
-            var cleanRow = {};
-            for (var key in row) {
-                if (row.hasOwnProperty(key)) {
-                    var cleanKey = trimText(key);
-                    var cleanValue = row[key] ? trimText(row[key]) : "";
-                    cleanRow[cleanKey] = cleanValue;
-                }
-            }
-            cleanData.push(cleanRow);
-        }
+        var cleanData = normalizeRows(dataArray);
         
         // Новые плашки будут складываться в новую папку рядом с master-comp.
         var parentFolder = masterComp.parentFolder;
@@ -906,6 +958,7 @@ function generatePlates(masterComp, settings) {
         
         var message = "✅ Готово!\n\n" +
                       "Новых плашек создано: " + createdCount + "\n" +
+                      "Источник: " + (settings.dataMode || "Таблица") + "\n" +
                       "Уже были в проекте: " + skippedExistingCount + "\n" +
                       "Пропущено строк без ФИО/с ошибкой: " + skippedCount + "\n" +
                       "Всего: " + cleanData.length + "\n\n" +

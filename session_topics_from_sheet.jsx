@@ -21,6 +21,7 @@
     var DEFAULT_DESC_LAYER = "ОПИСАНИЕ";
     var DEFAULT_TSV_FOLDER = "ae_plaque_data";
     var DEFAULT_TSV_FILE = "session_topics_extracted.tsv";
+    var DEFAULT_COMP_NAME_COLUMN = "ИМЯ_КОМПОЗИЦИИ";
     var PROGRAM_FIRST_COLUMN_INDEX = 1; // B
     var PROGRAM_LAST_COLUMN_INDEX = 3; // D
 
@@ -40,6 +41,24 @@
             name = name.substring(0, 80);
         }
         return name;
+    }
+
+    function sanitizeCompName(value, allowSlash) {
+        var name = trimString(value || "Без темы");
+        var pattern = allowSlash ? /[\\:\*\?"<>\|#%\{\}\[\]]/g : /[\\\/:\*\?"<>\|#%\{\}\[\]]/g;
+        name = name.replace(pattern, "-");
+        name = name.replace(/\s+/g, " ");
+        if (name.length > 120) {
+            name = name.substring(0, 120);
+        }
+        return name;
+    }
+
+    function outputCompNameForRecord(settings, record, number) {
+        if (trimString(record.compName) !== "") {
+            return sanitizeCompName(record.compName, true);
+        }
+        return settings.namePrefix + padNumber(number, 2) + " - " + sanitizeName(record.title);
     }
 
     function padNumber(num, width) {
@@ -62,8 +81,82 @@
         return normalizeText(value).replace(/\s+/g, " ").toLowerCase();
     }
 
+    function titleCaseUpperWords(value) {
+        return String(value || "").replace(/[A-ZА-ЯЁ]{2,}/g, function (token) {
+            if (token.toUpperCase() === token && token.toLowerCase() !== token) {
+                return token.charAt(0).toUpperCase() + token.substring(1).toLowerCase();
+            }
+            return token;
+        });
+    }
+
+    function cleanVenueHeader(value) {
+        var text = normalizeText(value).replace(/\s+/g, " ");
+        text = text.replace(/\(\s*(?:до\s*)?\d+\s*(?:мест[а]?|чел(?:овек)?\.?)\s*\)/ig, " ");
+        text = text.replace(/\b(?:до\s*)?\d+\s*(?:мест[а]?|чел(?:овек)?\.?)\b/ig, " ");
+        text = text.replace(/\s+/g, " ").replace(/^[\s\-—]+|[\s\-—]+$/g, "");
+        return titleCaseUpperWords(text);
+    }
+
+    function sessionCompName(venueName, title) {
+        var cleanTitle = cleanTopic(title);
+        if (cleanTitle === "") return "";
+        var cleanVenue = cleanVenueHeader(venueName);
+        return cleanVenue !== "" ? cleanVenue + "/" + cleanTitle : cleanTitle;
+    }
+
     function recordKey(record) {
-        return normalizeKey(record.title);
+        return normalizeKey(record.sourceKey || record.compName || record.title);
+    }
+
+    var SESSION_META_MARKER = "SHEET2COMP_SESSION_META";
+
+    function jsonEncodeObject(value) {
+        if (typeof JSON !== "undefined" && JSON.stringify) return JSON.stringify(value);
+        var parts = [];
+        for (var key in value) {
+            if (value.hasOwnProperty(key)) {
+                parts.push("\"" + key + "\":\"" + String(value[key] || "").replace(/\\/g, "\\\\").replace(/"/g, "\\\"").replace(/\r/g, "\\r").replace(/\n/g, "\\n") + "\"");
+            }
+        }
+        return "{" + parts.join(",") + "}";
+    }
+
+    function jsonDecodeObject(text) {
+        if (!text) return null;
+        try {
+            if (typeof JSON !== "undefined" && JSON.parse) return JSON.parse(text);
+            return eval("(" + text + ")");
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function buildSessionMeta(record, compName) {
+        return {
+            kind: "session-topic",
+            version: "1",
+            key: recordKey(record),
+            expectedCompName: compName,
+            title: record.title,
+            description: record.description,
+            signature: normalizeKey(record.title) + "|" + normalizeKey(record.description),
+            updatedAt: (new Date()).toISOString ? (new Date()).toISOString() : String(new Date())
+        };
+    }
+
+    function readSessionMeta(comp) {
+        var comment = String(comp.comment || "");
+        var pattern = new RegExp("\\[" + SESSION_META_MARKER + "\\]([\\s\\S]*?)\\[\\/" + SESSION_META_MARKER + "\\]");
+        var match = comment.match(pattern);
+        return match ? jsonDecodeObject(match[1]) : null;
+    }
+
+    function writeSessionMeta(comp, meta) {
+        var comment = String(comp.comment || "");
+        var pattern = new RegExp("\\n?\\[" + SESSION_META_MARKER + "\\][\\s\\S]*?\\[\\/" + SESSION_META_MARKER + "\\]", "g");
+        comment = comment.replace(pattern, "");
+        comp.comment = trimString(comment + "\n[" + SESSION_META_MARKER + "]" + jsonEncodeObject(meta) + "[/" + SESSION_META_MARKER + "]");
     }
 
     function isComp(item) {
@@ -194,11 +287,13 @@
         var header = rows[0];
         var titleIndex = -1;
         var descIndex = -1;
+        var compNameIndex = -1;
 
         for (var i = 0; i < header.length; i++) {
             var name = trimString(stripBom(header[i]));
             if (name === titleColumnName) titleIndex = i;
             if (name === descColumnName) descIndex = i;
+            if (name === DEFAULT_COMP_NAME_COLUMN) compNameIndex = i;
         }
 
         var startRow = 1;
@@ -216,8 +311,9 @@
             var row = rows[r];
             var title = row.length > titleIndex ? trimString(row[titleIndex]) : "";
             var desc = descIndex >= 0 && row.length > descIndex ? trimString(row[descIndex]) : "";
+            var compName = compNameIndex >= 0 && row.length > compNameIndex ? trimString(row[compNameIndex]) : "";
             if (title !== "" || desc !== "") {
-                records.push({ title: title, description: desc });
+                records.push({ title: title, description: desc, compName: compName, sourceKey: compName !== "" ? "comp:" + compName : "row:" + r });
             }
         }
 
@@ -292,12 +388,37 @@
     function rowsToProgramRecords(rows) {
         var records = [];
         var seen = {};
+        var venueNames = {};
+        var fallbackVenueNames = { 1: "Амфитеатр", 2: "Урал 1", 3: "Урал 2" };
+
+        for (var h = 0; h < rows.length && h < 30; h++) {
+            var headerRow = rows[h];
+            var hasTimeHeader = false;
+            for (var hc = 0; hc < headerRow.length; hc++) {
+                if (normalizeKey(headerRow[hc]) === normalizeKey("ВРЕМЯ")) {
+                    hasTimeHeader = true;
+                    break;
+                }
+            }
+            if (hasTimeHeader) {
+                for (var vc = PROGRAM_FIRST_COLUMN_INDEX; vc <= PROGRAM_LAST_COLUMN_INDEX; vc++) {
+                    venueNames[vc] = cleanVenueHeader(headerRow.length > vc ? headerRow[vc] : "") || fallbackVenueNames[vc];
+                }
+                break;
+            }
+        }
+        for (var fc = PROGRAM_FIRST_COLUMN_INDEX; fc <= PROGRAM_LAST_COLUMN_INDEX; fc++) {
+            if (!venueNames[fc]) venueNames[fc] = fallbackVenueNames[fc];
+        }
+
         for (var r = 0; r < rows.length; r++) {
             var row = rows[r];
             var lastColumn = Math.min(PROGRAM_LAST_COLUMN_INDEX, row.length - 1);
             for (var c = PROGRAM_FIRST_COLUMN_INDEX; c <= lastColumn; c++) {
                 var record = extractProgramRecord(row[c]);
                 if (!record) continue;
+                record.compName = sessionCompName(venueNames[c], record.title);
+                record.sourceKey = "program:" + r + ":" + c;
                 var key = recordKey(record);
                 if (seen[key]) continue;
                 seen[key] = true;
@@ -333,9 +454,9 @@
             throw new Error("Не получилось записать TSV: " + file.fsName);
         }
 
-        file.write(DEFAULT_TITLE_LAYER + "\t" + DEFAULT_DESC_LAYER + "\n");
+        file.write(DEFAULT_TITLE_LAYER + "\t" + DEFAULT_DESC_LAYER + "\t" + DEFAULT_COMP_NAME_COLUMN + "\n");
         for (var i = 0; i < records.length; i++) {
-            file.write(tsvEscape(records[i].title) + "\t" + tsvEscape(records[i].description) + "\n");
+            file.write(tsvEscape(records[i].title) + "\t" + tsvEscape(records[i].description) + "\t" + tsvEscape(records[i].compName) + "\n");
         }
         file.close();
         return file.fsName;
@@ -403,12 +524,35 @@
             var item = app.project.item(i);
             if (!isComp(item) || item === mainComp) continue;
 
+            keys[normalizeKey(item.name)] = true;
             var title = getTextLayerValue(item, settings.titleLayerName);
             var description = getTextLayerValue(item, settings.descLayerName);
             if (trimString(title) === "" && trimString(description) === "") continue;
             keys[recordKey({ title: title, description: description })] = true;
         }
         return keys;
+    }
+
+    function existingCompMaps(settings, mainComp) {
+        var byName = {};
+        var byTitle = {};
+        var byMetaKey = {};
+        for (var i = 1; i <= app.project.numItems; i++) {
+            var item = app.project.item(i);
+            if (!isComp(item) || item === mainComp) continue;
+
+            byName[normalizeKey(item.name)] = item;
+            var meta = readSessionMeta(item);
+            if (meta && meta.kind === "session-topic" && meta.key) {
+                byMetaKey[meta.key] = item;
+            }
+            var title = getTextLayerValue(item, settings.titleLayerName);
+            if (trimString(title) !== "") {
+                var titleKey = normalizeKey(title);
+                if (!byTitle[titleKey]) byTitle[titleKey] = item;
+            }
+        }
+        return { byName: byName, byTitle: byTitle, byMetaKey: byMetaKey };
     }
 
     function countCompsWithPrefix(prefix) {
@@ -450,37 +594,123 @@
 
         var created = [];
         var skipped = [];
-        var existingKeys = existingRecordKeyMap(settings, mainComp);
+        var updated = [];
+        var renamed = [];
+        var conflicts = [];
+        var maps = existingCompMaps(settings, mainComp);
         var nextNumber = countCompsWithPrefix(settings.namePrefix) + 1;
-        app.beginUndoGroup(SCRIPT_NAME);
+
+        var planned = [];
+        var preview = [];
+        var plannedCreates = 0;
+        var plannedUpdates = 0;
         try {
             for (var i = 0; i < records.length; i++) {
                 var record = records[i];
+                var titleKey = normalizeKey(record.title);
+                var targetName = outputCompNameForRecord(settings, record, nextNumber);
+                var targetKey = normalizeKey(targetName);
                 var key = recordKey(record);
-                if (existingKeys[key]) {
-                    skipped.push(record.title);
+                var existingByMeta = maps.byMetaKey[key];
+                var existingByName = maps.byName[targetKey];
+                var existingByTitle = maps.byTitle[titleKey];
+                var existing = existingByMeta || existingByName || existingByTitle;
+
+                if (existing) {
+                    var meta = readSessionMeta(existing);
+                    var changes = [];
+                    var currentTitle = getTextLayerValue(existing, settings.titleLayerName);
+                    var currentDescription = getTextLayerValue(existing, settings.descLayerName);
+                    if (normalizeKey(currentTitle) !== normalizeKey(record.title)) {
+                        changes.push("ТЕМА: \"" + currentTitle + "\" -> \"" + record.title + "\"");
+                    }
+                    if (normalizeKey(currentDescription) !== normalizeKey(record.description)) {
+                        changes.push("ОПИСАНИЕ: \"" + currentDescription + "\" -> \"" + record.description + "\"");
+                    }
+                    if (existing.name !== targetName && (!meta || existing.name === meta.expectedCompName || existingByTitle === existing)) {
+                        if (maps.byName[targetKey] && maps.byName[targetKey] !== existing) {
+                            conflicts.push(targetName);
+                            continue;
+                        }
+                        changes.unshift("имя композиции: \"" + existing.name + "\" -> \"" + targetName + "\"");
+                    }
+
+                    if (changes.length === 0) {
+                        skipped.push(record.title);
+                        writeSessionMeta(existing, buildSessionMeta(record, targetName));
+                    } else {
+                        plannedUpdates++;
+                        planned.push({ action: "update", comp: existing, record: record, targetName: targetName, changes: changes });
+                        if (preview.length < 12) preview.push(existing.name + "\n  " + changes.join("\n  "));
+                    }
                     continue;
                 }
 
-                var comp = mainComp.duplicate();
-                comp.name = settings.namePrefix + padNumber(nextNumber, 2) + " - " + sanitizeName(record.title);
-                nextNumber++;
+                plannedCreates++;
+                planned.push({ action: "create", record: record, targetName: targetName, changes: ["создать композицию"] });
+                if (preview.length < 12) preview.push(targetName + "\n  создать композицию");
+                if (trimString(record.compName) === "") nextNumber++;
+            }
+        } catch (planErr) {
+            throw planErr;
+        }
 
-                setTextLayer(comp, settings.titleLayerName, record.title);
-                setTextLayer(comp, settings.descLayerName, record.description);
+        var confirmMessage = "План обновления тем сессий\n\n" +
+            "Создать: " + plannedCreates + "\n" +
+            "Обновить: " + plannedUpdates + "\n" +
+            "Без изменений: " + skipped.length + "\n" +
+            "Конфликты имен: " + conflicts.length + "\n" +
+            "Всего найдено уникальных строк: " + records.length + "\n\n" +
+            (preview.length > 0 ? "Что изменится:\n" + preview.join("\n\n") + "\n\n" : "") +
+            "Применить эти изменения?";
+        if (planned.length === 0) {
+            return { created: created, updated: updated, skipped: skipped, renamed: renamed, conflicts: conflicts, total: records.length, savedTsvPath: savedTsvPath };
+        }
+        if (!confirm(confirmMessage)) {
+            return { created: created, updated: updated, skipped: skipped, renamed: renamed, conflicts: conflicts, total: records.length, savedTsvPath: savedTsvPath };
+        }
 
-                if (settings.addToRenderQueue) {
-                    app.project.renderQueue.items.add(comp);
+        app.beginUndoGroup(SCRIPT_NAME);
+        try {
+            for (var p = 0; p < planned.length; p++) {
+                var item = planned[p];
+                var comp;
+                if (item.action === "create") {
+                    comp = mainComp.duplicate();
+                    comp.name = item.targetName;
+                    setTextLayer(comp, settings.titleLayerName, item.record.title);
+                    setTextLayer(comp, settings.descLayerName, item.record.description);
+
+                    if (settings.addToRenderQueue) {
+                        app.project.renderQueue.items.add(comp);
+                    }
+                    created.push(comp.name);
+                } else {
+                    comp = item.comp;
+                    var oldName = comp.name;
+                    if (oldName !== item.targetName) {
+                        var currentMeta = readSessionMeta(comp);
+                        if (!currentMeta || oldName === currentMeta.expectedCompName) {
+                            comp.name = item.targetName;
+                            renamed.push(oldName + " -> " + item.targetName);
+                        }
+                    }
+                    setTextLayer(comp, settings.titleLayerName, item.record.title);
+                    setTextLayer(comp, settings.descLayerName, item.record.description);
+                    updated.push(comp.name);
                 }
-                created.push(comp.name);
-                existingKeys[key] = true;
+                writeSessionMeta(comp, buildSessionMeta(item.record, item.targetName));
+
+                maps.byName[normalizeKey(comp.name)] = comp;
+                maps.byTitle[normalizeKey(item.record.title)] = comp;
+                maps.byMetaKey[recordKey(item.record)] = comp;
             }
         } catch (err) {
             app.endUndoGroup();
             throw err;
         }
         app.endUndoGroup();
-        return { created: created, skipped: skipped, total: records.length, savedTsvPath: savedTsvPath };
+        return { created: created, updated: updated, skipped: skipped, renamed: renamed, conflicts: conflicts, total: records.length, savedTsvPath: savedTsvPath };
     }
 
     function buildUI(thisObj) {
@@ -577,6 +807,35 @@
             if (file) fileText.text = file.fsName;
         };
 
+        function applyPreset() {
+            var preset = $.global.__sheet2compSessionTopicsPreset;
+            if (!preset) return;
+
+            if (preset.sourceMode === "url") {
+                urlMode.value = true;
+                fileMode.value = false;
+                urlText.text = preset.url || "";
+            } else {
+                fileMode.value = true;
+                urlMode.value = false;
+                fileText.text = preset.filePath || preset.file || "";
+            }
+
+            if (typeof preset.delimiterIndex === "number" && preset.delimiterIndex >= 0 && preset.delimiterIndex < delimiterList.items.length) {
+                delimiterList.selection = preset.delimiterIndex;
+            }
+            if (typeof preset.programMode === "boolean") programModeCheck.value = preset.programMode;
+            if (typeof preset.saveExtractedTsv === "boolean") saveExtractedTsvCheck.value = preset.saveExtractedTsv;
+            if (preset.mainCompName) mainCompInput.text = preset.mainCompName;
+            if (preset.titleLayerName) titleLayerInput.text = preset.titleLayerName;
+            if (preset.descLayerName) descLayerInput.text = preset.descLayerName;
+            if (preset.titleColumnName) titleColumnInput.text = preset.titleColumnName;
+            if (preset.descColumnName) descColumnInput.text = preset.descColumnName;
+            if (preset.namePrefix) prefixInput.text = preset.namePrefix;
+            if (typeof preset.addToRenderQueue === "boolean") renderQueueCheck.value = preset.addToRenderQueue;
+            $.global.__sheet2compSessionTopicsPreset = null;
+        }
+
         runButton.onClick = function () {
             try {
                 var delimiterValues = ["auto", "\t", ",", ";"];
@@ -605,7 +864,10 @@
 
                 var result = makeComps(settings);
                 var message = "Готово.\nСоздано композиций: " + result.created.length +
+                    "\nОбновлено изменившихся: " + result.updated.length +
+                    "\nПереименовано старых: " + result.renamed.length +
                     "\nУже были, пропущены: " + result.skipped.length +
+                    "\nКонфликты имен: " + result.conflicts.length +
                     "\nВсего найдено уникальных строк: " + result.total + ".";
                 if (result.savedTsvPath !== "") {
                     message += "\n\nTSV для правки:\n" + result.savedTsvPath;
@@ -616,6 +878,7 @@
             }
         };
 
+        applyPreset();
         refreshMode();
         win.layout.layout(true);
         win.layout.resize();

@@ -40,7 +40,7 @@ def ensure_parent(path):
 
 def get_safe_output_path(output_path):
     try:
-        path = Path(output_path)
+        path = local_path_arg(output_path)
         ensure_parent(path)
         path.write_text("", encoding="utf-8")
         path.unlink()
@@ -48,7 +48,14 @@ def get_safe_output_path(output_path):
     except (PermissionError, OSError):
         safe_dir = Path.home() / "Documents" / "ae_plaque_data"
         safe_dir.mkdir(parents=True, exist_ok=True)
-        return safe_dir / Path(output_path).name
+        return safe_dir / local_path_arg(output_path).name
+
+
+def local_path_arg(value):
+    text = str(value or "").strip()
+    if text.startswith("file://"):
+        return Path(urllib.parse.unquote(urllib.parse.urlparse(text).path)).expanduser()
+    return Path(text).expanduser()
 
 
 def normalize_google_sheet_url(url):
@@ -65,6 +72,64 @@ def normalize_google_sheet_url(url):
     return "https://docs.google.com/spreadsheets/d/{}/gviz/tq?tqx=out:csv&gid={}".format(match.group(1), gid)
 
 
+def format_time_prefix(value):
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    if not text:
+        return ""
+    match = re.search(r"(\d{1,2})[:.\-–—](\d{2})", text)
+    if not match:
+        return ""
+    return "{:02d}-{}".format(int(match.group(1)), match.group(2))
+
+
+def split_name_words(value):
+    text = re.sub(r"\s+", " ", str(value or "").replace("\r", " ").replace("\n", " ")).strip()
+    return [clean_name_token(part) for part in re.split(r"[\s,;]+", text) if clean_name_token(part)]
+
+
+def person_alias_key(value):
+    words = split_name_words(value)
+    if len(words) < 2:
+        return ""
+
+    surname = ""
+    first = ""
+    for word in words:
+        if not surname and looks_like_surname(word):
+            surname = word
+        elif not first and not is_patronymic(word):
+            first = word
+    if not surname:
+        surname = words[0]
+    if not first:
+        first = words[1]
+
+    initial = re.sub(r"[^A-ZА-ЯЁ]", "", first.upper())[:1]
+    if not surname or not initial:
+        return ""
+    return "{}{}".format(compact_name_key(surname), initial.lower())
+
+
+def name_quality(value):
+    words = split_name_words(value)
+    full_words = [word for word in words if not is_initial_or_marker(word) and not is_patronymic(word)]
+    initials = [word for word in words if is_initial_or_marker(word)]
+    return len(full_words) * 10 - len(initials) + len(str(value or ""))
+
+
+def build_name_alias_map(rows, name_columns):
+    best_by_alias = {}
+    for row in rows:
+        name_value = get_by_columns(row, name_columns)
+        alias = person_alias_key(name_value)
+        if not alias:
+            continue
+        current = best_by_alias.get(alias, "")
+        if not current or name_quality(name_value) > name_quality(current):
+            best_by_alias[alias] = name_value
+    return best_by_alias
+
+
 def request_bytes(url, timeout=45):
     req = urllib.request.Request(url, headers={"User-Agent": DEFAULT_USER_AGENT})
     try:
@@ -72,17 +137,20 @@ def request_bytes(url, timeout=45):
             return response.read(), response.headers
     except urllib.error.HTTPError as exc:
         if exc.code in (401, 403, 404):
-            if exc.code == 404:
-                message = (
-                    "Google Sheets не нашел CSV для этой ссылки (HTTP 404). "
-                    "Проверьте ссылку, gid листа или укажите локальный CSV/TSV файл."
-                )
+            if "docs.google.com/spreadsheets" in str(url):
+                if exc.code == 404:
+                    message = (
+                        "Google Sheets не нашел CSV для этой ссылки (HTTP 404). "
+                        "Проверьте ссылку, gid листа или укажите локальный CSV/TSV файл."
+                    )
+                else:
+                    message = (
+                        "Google Sheets не дал доступ к CSV (HTTP {}). "
+                        "Откройте доступ к таблице 'Anyone with the link / Viewer', "
+                        "опубликуйте лист в CSV или укажите локальный CSV/TSV файл."
+                    ).format(exc.code)
             else:
-                message = (
-                    "Google Sheets не дал доступ к CSV (HTTP {}). "
-                    "Откройте доступ к таблице 'Anyone with the link / Viewer', "
-                    "опубликуйте лист в CSV или укажите локальный CSV/TSV файл."
-                ).format(exc.code)
+                message = "Ссылка не дала скачать файл (HTTP {}): {}".format(exc.code, url)
             raise UserFacingError(
                 message
             )
@@ -225,6 +293,80 @@ def format_name_for_plate(value):
     return format_first_name_last_name(value)
 
 
+def normalize_initial_token(value):
+    letters = re.sub(r"[^A-ZА-ЯЁ]", "", str(value or "").upper())
+    if not letters:
+        return ""
+    return ".".join(list(letters)) + "."
+
+
+def format_last_name_first_name(value):
+    text = re.sub(r"\s+", " ", str(value or "").replace("\r", " ").replace("\n", " ").replace("\t", " ")).strip()
+    if not text:
+        return ""
+
+    raw_parts = re.split(r"[\s,;]+", text)
+    initials = []
+    words = []
+    for raw_part in raw_parts:
+        part = clean_name_token(raw_part)
+        if not part:
+            continue
+        if is_initial_or_marker(part):
+            initial = normalize_initial_token(part)
+            if initial:
+                initials.append(initial)
+            continue
+        if is_patronymic(part):
+            continue
+        words.append(part)
+
+    if not words and initials:
+        return " ".join(initials)
+    if not words:
+        return ""
+
+    if len(words) == 1:
+        if initials:
+            return "{} {}".format(words[0], " ".join(initials)).strip()
+        return words[0]
+
+    known_name_index = -1
+    surname_index = -1
+    for idx, part in enumerate(words):
+        if known_name_index < 0 and is_known_first_name(part):
+            known_name_index = idx
+        if surname_index < 0 and looks_like_surname(part):
+            surname_index = idx
+
+    if known_name_index >= 0 and surname_index >= 0 and known_name_index != surname_index:
+        first_name = words[known_name_index]
+        surname = words[surname_index]
+    elif len(raw_parts) >= 3:
+        surname = words[0]
+        first_name = words[1]
+    else:
+        first = words[0]
+        second = words[1]
+        first_is_name = is_known_first_name(first)
+        second_is_name = is_known_first_name(second)
+        first_is_surname = looks_like_surname(first)
+        second_is_surname = looks_like_surname(second)
+
+        if first_is_name and not second_is_name:
+            first_name, surname = first, second
+        elif second_is_name and not first_is_name:
+            first_name, surname = second, first
+        elif first_is_surname and not second_is_surname:
+            surname, first_name = first, second
+        elif second_is_surname and not first_is_surname:
+            surname, first_name = second, first
+        else:
+            surname, first_name = first, second
+
+    return "{} {}".format(surname, first_name).strip()
+
+
 def photo_name_stem(value):
     name = format_first_name_last_name(value) or str(value or "").strip() or "photo"
     name = re.sub(r'[\\/:*?"<>|#%{}[\]]+', "", name)
@@ -243,6 +385,75 @@ def photo_filename(value, ext=".jpg"):
     return "{}{}".format(name[:120], ext.lower())
 
 
+def compact_name_key(value):
+    return re.sub(r"[^0-9a-zа-яё]+", "", str(value or "").lower().replace("ё", "е"))
+
+
+def name_parts_key(value):
+    formatted = format_first_name_last_name(value)
+    if not formatted:
+        formatted = str(value or "")
+    parts = [compact_name_key(part) for part in re.split(r"\s+", formatted) if compact_name_key(part)]
+    if len(parts) >= 2:
+        return parts[:2]
+    return parts
+
+
+def photo_name_keys(value):
+    parts = name_parts_key(value)
+    keys = set()
+    if parts:
+        keys.add("".join(parts))
+    if len(parts) >= 2:
+        keys.add(parts[1] + parts[0])
+    raw_key = compact_name_key(value)
+    if raw_key:
+        keys.add(raw_key)
+    return keys
+
+
+def file_matches_name(path, name_value):
+    stem = Path(path).stem
+    item_key = compact_name_key(stem)
+    if not item_key:
+        return False
+
+    keys = photo_name_keys(name_value)
+    for key in keys:
+        if key and (key == item_key or key in item_key or item_key in key):
+            return True
+
+    parts = name_parts_key(name_value)
+    if len(parts) >= 2:
+        return all(part in item_key for part in parts)
+    return False
+
+
+def canonical_photo_path(photos_dir, name_value, ext):
+    return Path(photos_dir) / photo_filename(name_value, ext)
+
+
+def rename_photo_to_canonical(path, photos_dir, name_value):
+    source = Path(path)
+    ext = source.suffix.lower()
+    if ext == ".jpeg":
+        ext = ".jpg"
+    if ext not in IMAGE_EXTENSIONS:
+        ext = ".jpg"
+
+    target = canonical_photo_path(photos_dir, name_value, ext)
+    if source == target:
+        return str(source)
+    if target.exists():
+        return str(target)
+
+    try:
+        source.rename(target)
+        return str(target)
+    except OSError:
+        return str(source)
+
+
 def find_existing_photo(photos_dir, name_value):
     stem = photo_name_stem(name_value)
     if not stem:
@@ -252,11 +463,23 @@ def find_existing_photo(photos_dir, name_value):
         candidate = Path(photos_dir) / "{}{}".format(stem, ext)
         if candidate.exists():
             return str(candidate)
+
+    for candidate in iter_image_files(photos_dir):
+        if candidate.is_file() and candidate.suffix.lower() in IMAGE_EXTENSIONS and file_matches_name(candidate, name_value):
+            return rename_photo_to_canonical(candidate, photos_dir, name_value)
     return ""
 
 
+def iter_image_files(photos_dir):
+    root = Path(photos_dir)
+    try:
+        return sorted([path for path in root.rglob("*") if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS])
+    except OSError:
+        return []
+
+
 def write_photo_file(photos_dir, name_value, ext, body):
-    photo_path = Path(photos_dir) / photo_filename(name_value, ext)
+    photo_path = canonical_photo_path(photos_dir, name_value, ext)
     photo_path.write_bytes(body)
     return str(photo_path)
 
@@ -269,6 +492,7 @@ def download_yandex_public_photo(public_url, photos_dir, row_index, name_value):
     }))
 
     candidates = []
+    is_single_file = data.get("type") == "file"
     if data.get("type") == "file" and is_image_resource(data):
         candidates.append(data)
 
@@ -278,17 +502,38 @@ def download_yandex_public_photo(public_url, photos_dir, row_index, name_value):
             candidates.append(item)
 
     if not candidates:
+        if is_single_file:
+            download_url = yandex_public_download_url(public_url, data.get("path") or "")
+            if not download_url:
+                return "", "Яндекс.Диск не вернул ссылку на скачивание"
+            body, headers = request_bytes(download_url)
+            if not body:
+                return "", "Пустой файл"
+            ext = Path(str(data.get("name") or "")).suffix.lower()
+            if ext not in IMAGE_EXTENSIONS:
+                ext = extension_from(headers, download_url)
+            if ext == ".jpeg":
+                ext = ".jpg"
+            return write_photo_file(photos_dir, name_value, ext, body), ""
         return "", "В публичной ссылке Яндекс.Диска не найдено изображение"
 
-    name_key = re.sub(r"[^0-9a-zа-яё]+", "", str(name_value or "").lower().replace("ё", "е"))
+    name_keys = photo_name_keys(name_value)
+    name_parts = name_parts_key(name_value)
 
     def score(item):
-        item_key = re.sub(r"[^0-9a-zа-яё]+", "", str(item.get("name") or "").lower().replace("ё", "е"))
-        if name_key and (name_key in item_key or item_key in name_key):
+        item_key = compact_name_key(item.get("name") or "")
+        for name_key in name_keys:
+            if name_key and (name_key == item_key or name_key in item_key or item_key in name_key):
+                return 0
+        if len(name_parts) >= 2 and all(part in item_key for part in name_parts):
             return 0
         return 1
 
-    selected = sorted(candidates, key=score)[0]
+    scored = sorted([(score(item), item) for item in candidates], key=lambda pair: pair[0])
+    if not is_single_file and scored[0][0] > 0:
+        return "", "В папке Яндекс.Диска не найден файл под имя {}".format(name_value)
+
+    selected = scored[0][1]
     download_url = yandex_original_size_url(selected)
     if not download_url:
         download_url = yandex_public_download_url(public_url, selected.get("path") or "")
@@ -426,28 +671,84 @@ def get_by_column(row, column_name):
     return ""
 
 
-def download_and_prepare(csv_url, output_json_path, photos_dir, photo_field, name_field):
+def get_by_columns(row, column_names):
+    for column_name in column_names:
+        value = get_by_column(row, column_name)
+        if str(value or "").strip():
+            return value
+    return ""
+
+
+def get_photo_value(row, column_names):
+    first_text_value = ""
+    for column_name in column_names:
+        value = get_by_column(row, column_name)
+        if not str(value or "").strip():
+            continue
+        if extract_urls(value):
+            return value
+        if not first_text_value:
+            first_text_value = value
+    return first_text_value
+
+
+def download_and_prepare(csv_url, output_json_path, photos_dir, photo_field, name_field, prepare_photos=True):
     csv_text = read_table_text(csv_url)
     delimiter = guess_delimiter(csv_text)
     rows = [clean_row(row) for row in csv.DictReader(io.StringIO(csv_text), delimiter=delimiter)]
     print("DEBUG: Parsed rows: {}".format(len(rows)))
 
     safe_json_path = get_safe_output_path(output_json_path)
-    photos_path = Path(photos_dir)
+    photos_path = local_path_arg(photos_dir)
     photos_path.mkdir(parents=True, exist_ok=True)
 
     downloaded = 0
     photo_errors = 0
+    rows_with_photo_value = 0
     prepared = []
 
+    photo_columns = [
+        photo_field,
+        "Ссылка на плашку",
+        "Фото на плашку",
+        "ФОТО",
+        "Фото",
+        "photo",
+    ]
+
+    name_columns = [
+        name_field,
+        "ФИО",
+        "ФИО спикера",
+        "Имя",
+        "ИМЯ",
+        "name",
+    ]
+    name_aliases = build_name_alias_map(rows, name_columns)
+
     for index, row in enumerate(rows, start=1):
-        photo_value = get_by_column(row, photo_field)
-        name_value = get_by_column(row, name_field)
+        photo_value = get_photo_value(row, photo_columns)
+        if str(photo_value or "").strip():
+            rows_with_photo_value += 1
+        raw_name_value = get_by_columns(row, name_columns)
+        name_value = name_aliases.get(person_alias_key(raw_name_value), raw_name_value)
         formatted_name = format_first_name_last_name(name_value)
-        local_photo, photo_error = download_photo(photo_value, photos_path, index, formatted_name or name_value)
+        comp_name = format_last_name_first_name(name_value)
+        # Recording TSV already contains the full date-and-time prefix, for example
+        # "20.07_11-30". Do not replace it with a time-only value while preparing rows.
+        source_time_prefix = str(row.get("__compTimePrefix") or "").strip()
+        time_prefix = source_time_prefix or format_time_prefix(
+            get_by_columns(row, ["НАЧАЛО", "ВРЕМЯ", "Время", "time", "start_time"])
+        )
+        if prepare_photos:
+            local_photo, photo_error = download_photo(photo_value, photos_path, index, formatted_name or name_value)
+        else:
+            local_photo, photo_error = "", ""
         photo_file_name = Path(local_photo).name if local_photo else photo_filename(formatted_name or name_value)
         row["__nameFirstLast"] = formatted_name
+        row["__nameLastFirst"] = comp_name
         row["__formattedName"] = formatted_name
+        row["__compTimePrefix"] = time_prefix
         row["__photoFileName"] = photo_file_name
         row["__photoLocalPath"] = local_photo
         row["__photoError"] = photo_error
@@ -459,6 +760,11 @@ def download_and_prepare(csv_url, output_json_path, photos_dir, photo_field, nam
 
     safe_json_path.write_text(json.dumps(prepared, ensure_ascii=False, indent=2), encoding="utf-8")
     print("SUCCESS:{} PHOTO:{} PHOTO_ERRORS:{}".format(len(prepared), downloaded, photo_errors))
+    print("DEBUG: Photo column values: {}".format(rows_with_photo_value))
+    if prepare_photos:
+        print("DEBUG: Image files in photos folder: {}".format(len(iter_image_files(photos_path))))
+    else:
+        print("DEBUG: Photo import disabled")
     print("DEBUG: JSON saved: {}".format(safe_json_path))
     print("DEBUG: Photos folder: {}".format(photos_path))
     return True
@@ -467,11 +773,12 @@ def download_and_prepare(csv_url, output_json_path, photos_dir, photo_field, nam
 if __name__ == "__main__":
     if len(sys.argv) < 6:
         print("ERROR: Недостаточно аргументов")
-        print("USAGE: python download_person_plate_data.py <sheet_url> <output_json_path> <photos_dir> <photo_field> <name_field>")
+        print("USAGE: python download_person_plate_data.py <sheet_url> <output_json_path> <photos_dir> <photo_field> <name_field> [prepare_photos:1|0]")
         sys.exit(1)
 
     try:
-        ok = download_and_prepare(sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5])
+        prepare_photos = len(sys.argv) < 7 or str(sys.argv[6]).strip() not in ("0", "false", "False", "no", "NO")
+        ok = download_and_prepare(sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], prepare_photos)
         sys.exit(0 if ok else 1)
     except UserFacingError as exc:
         print("ERROR:{}".format(exc))

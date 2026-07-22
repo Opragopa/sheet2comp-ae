@@ -11,8 +11,14 @@ from pathlib import Path
 
 DEFAULT_TOPIC_HEADER = "ТЕМА"
 DEFAULT_DESCRIPTION_HEADER = "ОПИСАНИЕ"
+DEFAULT_COMP_NAME_HEADER = "ИМЯ_КОМПОЗИЦИИ"
 PROGRAM_FIRST_COLUMN_INDEX = 1
 PROGRAM_LAST_COLUMN_INDEX = 3
+DEFAULT_VENUE_NAMES = {
+    1: "Амфитеатр",
+    2: "Урал 1",
+    3: "Урал 2",
+}
 
 
 def google_sheet_export_url(url):
@@ -71,6 +77,47 @@ def clean_text(value):
         previous_blank = is_blank
 
     return "\n".join(cleaned).strip()
+
+
+def inline_text(value):
+    return re.sub(r"\s+", " ", clean_text(value)).strip()
+
+
+def title_case_upper_words(value):
+    def convert(match):
+        token = match.group(0)
+        if token.upper() == token and token.lower() != token:
+            return token[:1].upper() + token[1:].lower()
+        return token
+
+    return re.sub(r"[A-ZА-ЯЁ]{2,}", convert, value)
+
+
+def clean_venue_header(value):
+    text = inline_text(value)
+    text = re.sub(r"\(\s*(?:до\s*)?\d+\s*(?:мест[а]?|чел(?:овек)?\.?)\s*\)", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b(?:до\s*)?\d+\s*(?:мест[а]?|чел(?:овек)?\.?)\b", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).strip(" -—")
+    return title_case_upper_words(text)
+
+
+def venue_names_from_rows(rows):
+    for row in rows[:30]:
+        if any(inline_text(cell).upper() == "ВРЕМЯ" for cell in row):
+            names = {}
+            for column_index, fallback in DEFAULT_VENUE_NAMES.items():
+                raw = row[column_index] if column_index < len(row) else ""
+                names[column_index] = clean_venue_header(raw) or fallback
+            return names
+    return dict(DEFAULT_VENUE_NAMES)
+
+
+def session_comp_name(venue_name, topic):
+    clean_topic_value = clean_topic(topic)
+    if not clean_topic_value:
+        return ""
+    clean_venue = clean_venue_header(venue_name)
+    return "{}/{}".format(clean_venue, clean_topic_value) if clean_venue else clean_topic_value
 
 
 def clean_topic(value):
@@ -154,23 +201,24 @@ def header_index(rows, column_name):
 def iter_source_cells(rows, source_column):
     column_index = header_index(rows, source_column)
     start_row = 1 if column_index is not None else 0
+    venue_names = venue_names_from_rows(rows)
 
     for row_number, row in enumerate(rows[start_row:], start=start_row + 1):
         if column_index is not None:
             if column_index < len(row):
-                yield row_number, column_index + 1, row[column_index]
+                yield row_number, column_index + 1, row[column_index], venue_names.get(column_index, "")
             continue
 
         last_column = min(PROGRAM_LAST_COLUMN_INDEX, len(row) - 1)
         for column_index in range(PROGRAM_FIRST_COLUMN_INDEX, last_column + 1):
-            yield row_number, column_index + 1, row[column_index]
+            yield row_number, column_index + 1, row[column_index], venue_names.get(column_index, "")
 
 
 def extract_records(rows, source_column):
     records = []
     seen = set()
 
-    for row_number, cell_number, cell in iter_source_cells(rows, source_column):
+    for row_number, cell_number, cell, venue_name in iter_source_cells(rows, source_column):
         session = extract_session(cell)
         if not session:
             continue
@@ -184,6 +232,7 @@ def extract_records(rows, source_column):
             {
                 DEFAULT_TOPIC_HEADER: session["topic"],
                 DEFAULT_DESCRIPTION_HEADER: session["description"],
+                DEFAULT_COMP_NAME_HEADER: session_comp_name(venue_name, session["topic"]),
                 "_source": "row {}, cell {}".format(row_number, cell_number),
             }
         )
@@ -197,7 +246,7 @@ def write_tsv(records, output_path):
     with output.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(
             handle,
-            fieldnames=[DEFAULT_TOPIC_HEADER, DEFAULT_DESCRIPTION_HEADER],
+            fieldnames=[DEFAULT_TOPIC_HEADER, DEFAULT_DESCRIPTION_HEADER, DEFAULT_COMP_NAME_HEADER],
             delimiter="\t",
             lineterminator="\n",
             extrasaction="ignore",
