@@ -72,6 +72,64 @@ def normalize_google_sheet_url(url):
     return "https://docs.google.com/spreadsheets/d/{}/gviz/tq?tqx=out:csv&gid={}".format(match.group(1), gid)
 
 
+def format_time_prefix(value):
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    if not text:
+        return ""
+    match = re.search(r"(\d{1,2})[:.\-–—](\d{2})", text)
+    if not match:
+        return ""
+    return "{:02d}-{}".format(int(match.group(1)), match.group(2))
+
+
+def split_name_words(value):
+    text = re.sub(r"\s+", " ", str(value or "").replace("\r", " ").replace("\n", " ")).strip()
+    return [clean_name_token(part) for part in re.split(r"[\s,;]+", text) if clean_name_token(part)]
+
+
+def person_alias_key(value):
+    words = split_name_words(value)
+    if len(words) < 2:
+        return ""
+
+    surname = ""
+    first = ""
+    for word in words:
+        if not surname and looks_like_surname(word):
+            surname = word
+        elif not first and not is_patronymic(word):
+            first = word
+    if not surname:
+        surname = words[0]
+    if not first:
+        first = words[1]
+
+    initial = re.sub(r"[^A-ZА-ЯЁ]", "", first.upper())[:1]
+    if not surname or not initial:
+        return ""
+    return "{}{}".format(compact_name_key(surname), initial.lower())
+
+
+def name_quality(value):
+    words = split_name_words(value)
+    full_words = [word for word in words if not is_initial_or_marker(word) and not is_patronymic(word)]
+    initials = [word for word in words if is_initial_or_marker(word)]
+    return len(full_words) * 10 - len(initials) + len(str(value or ""))
+
+
+def build_name_alias_map(rows, name_columns):
+    best_by_alias = {}
+    for row in rows:
+        name_value = get_by_columns(row, name_columns)
+        alias = person_alias_key(name_value)
+        if not alias:
+            continue
+        current = best_by_alias.get(alias, "")
+        if not current or name_quality(name_value) > name_quality(current):
+            best_by_alias[alias] = name_value
+    return best_by_alias
+
+
 def request_bytes(url, timeout=45):
     req = urllib.request.Request(url, headers={"User-Agent": DEFAULT_USER_AGENT})
     try:
@@ -233,6 +291,80 @@ def format_first_name_last_name(value):
 
 def format_name_for_plate(value):
     return format_first_name_last_name(value)
+
+
+def normalize_initial_token(value):
+    letters = re.sub(r"[^A-ZА-ЯЁ]", "", str(value or "").upper())
+    if not letters:
+        return ""
+    return ".".join(list(letters)) + "."
+
+
+def format_last_name_first_name(value):
+    text = re.sub(r"\s+", " ", str(value or "").replace("\r", " ").replace("\n", " ").replace("\t", " ")).strip()
+    if not text:
+        return ""
+
+    raw_parts = re.split(r"[\s,;]+", text)
+    initials = []
+    words = []
+    for raw_part in raw_parts:
+        part = clean_name_token(raw_part)
+        if not part:
+            continue
+        if is_initial_or_marker(part):
+            initial = normalize_initial_token(part)
+            if initial:
+                initials.append(initial)
+            continue
+        if is_patronymic(part):
+            continue
+        words.append(part)
+
+    if not words and initials:
+        return " ".join(initials)
+    if not words:
+        return ""
+
+    if len(words) == 1:
+        if initials:
+            return "{} {}".format(words[0], " ".join(initials)).strip()
+        return words[0]
+
+    known_name_index = -1
+    surname_index = -1
+    for idx, part in enumerate(words):
+        if known_name_index < 0 and is_known_first_name(part):
+            known_name_index = idx
+        if surname_index < 0 and looks_like_surname(part):
+            surname_index = idx
+
+    if known_name_index >= 0 and surname_index >= 0 and known_name_index != surname_index:
+        first_name = words[known_name_index]
+        surname = words[surname_index]
+    elif len(raw_parts) >= 3:
+        surname = words[0]
+        first_name = words[1]
+    else:
+        first = words[0]
+        second = words[1]
+        first_is_name = is_known_first_name(first)
+        second_is_name = is_known_first_name(second)
+        first_is_surname = looks_like_surname(first)
+        second_is_surname = looks_like_surname(second)
+
+        if first_is_name and not second_is_name:
+            first_name, surname = first, second
+        elif second_is_name and not first_is_name:
+            first_name, surname = second, first
+        elif first_is_surname and not second_is_surname:
+            surname, first_name = first, second
+        elif second_is_surname and not first_is_surname:
+            surname, first_name = second, first
+        else:
+            surname, first_name = first, second
+
+    return "{} {}".format(surname, first_name).strip()
 
 
 def photo_name_stem(value):
@@ -592,20 +724,31 @@ def download_and_prepare(csv_url, output_json_path, photos_dir, photo_field, nam
         "ИМЯ",
         "name",
     ]
+    name_aliases = build_name_alias_map(rows, name_columns)
 
     for index, row in enumerate(rows, start=1):
         photo_value = get_photo_value(row, photo_columns)
         if str(photo_value or "").strip():
             rows_with_photo_value += 1
-        name_value = get_by_columns(row, name_columns)
+        raw_name_value = get_by_columns(row, name_columns)
+        name_value = name_aliases.get(person_alias_key(raw_name_value), raw_name_value)
         formatted_name = format_first_name_last_name(name_value)
+        comp_name = format_last_name_first_name(name_value)
+        # Recording TSV already contains the full date-and-time prefix, for example
+        # "20.07_11-30". Do not replace it with a time-only value while preparing rows.
+        source_time_prefix = str(row.get("__compTimePrefix") or "").strip()
+        time_prefix = source_time_prefix or format_time_prefix(
+            get_by_columns(row, ["НАЧАЛО", "ВРЕМЯ", "Время", "time", "start_time"])
+        )
         if prepare_photos:
             local_photo, photo_error = download_photo(photo_value, photos_path, index, formatted_name or name_value)
         else:
             local_photo, photo_error = "", ""
         photo_file_name = Path(local_photo).name if local_photo else photo_filename(formatted_name or name_value)
         row["__nameFirstLast"] = formatted_name
+        row["__nameLastFirst"] = comp_name
         row["__formattedName"] = formatted_name
+        row["__compTimePrefix"] = time_prefix
         row["__photoFileName"] = photo_file_name
         row["__photoLocalPath"] = local_photo
         row["__photoError"] = photo_error

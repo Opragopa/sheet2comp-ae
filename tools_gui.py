@@ -11,6 +11,7 @@ from tkinter import filedialog, messagebox, ttk
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_DATA_DIR = Path.home() / "Documents" / "ae_plaque_data"
 DEFAULT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1J6nJHM4wXF66LJO7dDNT6QgrxlQ5VPb-3B-4o7Ff0js/edit?gid=0#gid=0"
+DEFAULT_CONTENT_PLAN_URL = "https://docs.google.com/spreadsheets/d/10C3eoaG146WgOeQeoli90dQCHPruoJ_d4_rqcyoUR8M/edit?gid=213088400#gid=213088400"
 
 
 class TextField:
@@ -54,6 +55,7 @@ class ToolsGui(tk.Tk):
         self.tabs.grid(row=0, column=0, sticky="nsew", padx=12, pady=(12, 8))
 
         self.build_photo_tab()
+        self.build_content_plan_tab()
         self.build_topics_tab()
         self.build_yandex_tab()
         self.build_service_tab()
@@ -70,6 +72,14 @@ class ToolsGui(tk.Tk):
         self.photo_dir = TextField(frame, 0, "Папка фото", str(DEFAULT_DATA_DIR / "person_plate_photos"), browse="dir")
         self.photo_json = TextField(frame, 1, "JSON для AE", str(DEFAULT_DATA_DIR / "person_plates_data.json"), browse="save")
         ttk.Button(frame, text="Скачать и переименовать фото", command=self.run_photo_prepare).grid(row=2, column=1, sticky="w", pady=(12, 4))
+
+    def build_content_plan_tab(self):
+        frame = self.panel("Контент-план")
+        self.content_source = TextField(frame, 0, "Источник", DEFAULT_CONTENT_PLAN_URL)
+        self.content_output = TextField(frame, 1, "Папка результата", str(DEFAULT_DATA_DIR / "content_plan"), browse="dir")
+        self.content_day = TextField(frame, 2, "День/дата", "")
+        ttk.Label(frame, text="Например: ДЕНЬ 3 или 22.07. Если пусто, выгрузятся все дни.").grid(row=3, column=1, sticky="w", pady=4)
+        ttk.Button(frame, text="Разобрать контент-план", command=self.run_content_plan_extract).grid(row=4, column=1, sticky="w", pady=(12, 4))
 
     def build_topics_tab(self):
         frame = self.panel("Темы сессий")
@@ -214,6 +224,22 @@ class ToolsGui(tk.Tk):
         if self.topics_column.get():
             command.extend(["--source-column", self.topics_column.get()])
         self.run_command("Темы сессий", command)
+
+    def run_content_plan_extract(self):
+        script = self.script("extract_content_plan.py")
+        if not script:
+            return
+        if not self.validate_required((("Источник", self.content_source.get()), ("Папка результата", self.content_output.get()))):
+            return
+        command = [
+            sys.executable,
+            script,
+            self.content_source.get(),
+            "-o", self.content_output.get(),
+        ]
+        if self.content_day.get():
+            command.extend(["--day", self.content_day.get()])
+        self.run_command("Контент-план", command)
 
     def run_yandex_links(self):
         script = self.script("yandex_disk_links_from_names.py")

@@ -113,6 +113,7 @@
             photoField: "Фото на плашку",
             shiftField: "Смена",
             shiftFilter: "единство",
+            templateCompName: "",
             nameLayer: "ИМЯ",
             nameLayerIndex: "3",
             positionLayer: "ДОЛЖНОСТЬ",
@@ -126,6 +127,7 @@
             requirePhotoPrecomp: false,
             autoImportPhotos: true,
             recreateExistingComps: false,
+            targetFolderName: "",
             compPrefix: "Плашка",
             delimiter: "_",
             photoFolderPath: "",
@@ -278,6 +280,160 @@
 
         prop.setValue(nextDoc);
         return layer;
+    }
+
+    function expressionStringLiteral(value) {
+        return "\"" + String(value || "")
+            .replace(/\\/g, "\\\\")
+            .replace(/"/g, "\\\"")
+            .replace(/\r/g, "\\r")
+            .replace(/\n/g, "\\n") + "\"";
+    }
+
+    function buildPositionAutoScaleExpression(fallbackText) {
+        var fallback = cleanPlateText(fallbackText) || "должность не задана";
+        return [
+            "function sliderValue(name, defaultValue) {",
+            "    try {",
+            "        return thisComp.layer(\"CONTROL\").effect(name)(\"Slider\").value;",
+            "    } catch (e1) {",
+            "        try {",
+            "            return thisComp.layer(\"CONTROLLER\").effect(name)(\"Slider\").value;",
+            "        } catch (e2) {",
+            "            return defaultValue;",
+            "        }",
+            "    }",
+            "}",
+            "",
+            "var fallbackText = " + expressionStringLiteral(fallback) + ";",
+            "var txt = \"\";",
+            "try {",
+            "    if (value && value.text !== undefined) {",
+            "        txt = value.text;",
+            "    } else {",
+            "        txt = value.toString();",
+            "    }",
+            "} catch (e) {",
+            "    txt = \"\";",
+            "}",
+            "txt = txt.toString().replace(/^\\s+|\\s+$/g, \"\");",
+            "if (txt === \"\") {",
+            "    txt = fallbackText;",
+            "}",
+            "",
+            "var baseSize = sliderValue(\"Regalia Base Size\", 42);",
+            "var minSize = sliderValue(\"Regalia Min Size\", 10);",
+            "var boxChars = sliderValue(\"Regalia Chars Per Line\", 24);",
+            "var maxLines = sliderValue(\"Regalia Max Lines\", 4);",
+            "var manualSize = sliderValue(\"Regalia Manual Size\", 0);",
+            "",
+            "var clean = txt.toString().replace(/\\s+/g, \" \");",
+            "var chars = clean.length;",
+            "var estimatedLines = Math.ceil(chars / Math.max(boxChars, 1));",
+            "",
+            "var k = maxLines / Math.max(estimatedLines, 1);",
+            "var nextSize = Math.floor(baseSize * Math.min(1, k));",
+            "nextSize = Math.max(minSize, nextSize);",
+            "",
+            "if (manualSize > 0) {",
+            "    nextSize = manualSize;",
+            "}",
+            "",
+            "txt = txt.charAt(0).toUpperCase() + txt.substring(1);",
+            "",
+            "style",
+            "    .setFontSize(nextSize)",
+            "    .setText(txt);"
+        ].join("\n");
+    }
+
+    function applyPositionExpression(layer, fallbackText) {
+        var prop = getSourceTextProperty(layer);
+        if (!prop || !prop.canSetExpression) return false;
+        prop.expression = buildPositionAutoScaleExpression(fallbackText);
+        prop.expressionEnabled = true;
+        return true;
+    }
+
+    function buildNameExpression() {
+        return [
+            "var delimiter = \"_\";",
+            "",
+            "function clean(v) {",
+            "    return String(v || \"\").replace(/[\\r\\n\\t]+/g, \" \").replace(/\\s+/g, \" \").replace(/^\\s+|\\s+$/g, \"\");",
+            "}",
+            "",
+            "function textValue(v) {",
+            "    try {",
+            "        if (v && v.text !== undefined) return clean(v.text);",
+            "    } catch (e1) {}",
+            "    try {",
+            "        return clean(v.toString());",
+            "    } catch (e2) {}",
+            "    return \"\";",
+            "}",
+            "",
+            "function getText(layerName) {",
+            "    try {",
+            "        return textValue(thisComp.layer(layerName).text.sourceText.value);",
+            "    } catch (e) {",
+            "        return \"\";",
+            "    }",
+            "}",
+            "",
+            "function stripDateTimePrefix(text) {",
+            "    var t = clean(text);",
+            "    t = t.replace(/^\\d{1,2}[.\\/-]\\d{1,2}[_\\s-]+\\d{1,2}[-:.]\\d{2}[_\\s-]*/, \"\");",
+            "    t = t.replace(/^\\d{1,2}[-:.]\\d{2}[_\\s-]+/, \"\");",
+            "    return clean(t);",
+            "}",
+            "",
+            "function personFromCompName() {",
+            "    var parts = thisComp.name.split(delimiter);",
+            "    var full = \"\";",
+            "    if (parts.length >= 3 && /^\\d{1,2}[.\\/-]\\d{1,2}$/.test(clean(parts[0])) && /^\\d{1,2}[-:.]\\d{2}$/.test(clean(parts[1]))) {",
+            "        full = parts.slice(2).join(delimiter);",
+            "    } else if (parts.length > 1) {",
+            "        full = parts.slice(1).join(delimiter);",
+            "    } else {",
+            "        full = thisComp.name;",
+            "    }",
+            "    return stripDateTimePrefix(full);",
+            "}",
+            "",
+            "function firstLastFromLastFirst(text) {",
+            "    var full = stripDateTimePrefix(text);",
+            "    var compactInitials = full.match(/^((?:[А-ЯЁA-Z]\\.\\s*){1,3})([А-ЯЁA-Z][а-яёa-z-]+)$/);",
+            "    if (compactInitials) {",
+            "        return clean(compactInitials[1].replace(/\\s+/g, \"\") + \" \" + compactInitials[2]);",
+            "    }",
+            "    var parts = full.split(\" \");",
+            "    if (parts.length >= 2) {",
+            "        return clean(parts.slice(1).join(\" \") + \" \" + parts[0]);",
+            "    }",
+            "    return full;",
+            "}",
+            "",
+            "var manual = getText(\"MANUAL_NAME\");",
+            "var current = textValue(value);",
+            "var result = manual;",
+            "if (result === \"\" && current !== \"\" && current !== \"ФИО спикера\" && current !== \"ИМЯ\" && current !== \"ИМЯ ФАМИЛИЯ\") {",
+            "    result = current;",
+            "}",
+            "if (result === \"\") {",
+            "    result = firstLastFromLastFirst(personFromCompName());",
+            "}",
+            "",
+            "result.toUpperCase();"
+        ].join("\n");
+    }
+
+    function applyNameExpression(layer) {
+        var prop = getSourceTextProperty(layer);
+        if (!prop || !prop.canSetExpression) return false;
+        prop.expression = buildNameExpression();
+        prop.expressionEnabled = true;
+        return true;
     }
 
     function normalizeRow(row) {
@@ -465,10 +621,240 @@
         return titleCaseNamePart(parts[0] || text);
     }
 
-    function buildOutputCompName(settings, name) {
+    function cleanCompPersonNameText(value) {
+        var text = safeCompText(value, "_").replace(/\([^)]*\)/g, " ");
+        text = cleanPlateText(text);
+        return text || "Без имени";
+    }
+
+    function buildOutputCompName(settings, name, timePrefix) {
         var prefix = cleanPlateText(settings.compPrefix) || "Визитка";
         var delimiter = settings.delimiter || "_";
-        return prefix + delimiter + compPersonNameText(name);
+        var cleanTime = cleanPlateText(timePrefix);
+        // Rows from the recording plan carry an explicit date-and-time prefix.
+        // It is a data contract, so it must win over any UI prefix/type setting.
+        if (cleanTime !== "") {
+            return cleanTime + delimiter + cleanCompPersonNameText(name);
+        }
+        return prefix + delimiter + cleanCompPersonNameText(name);
+    }
+
+    function uniqueNamePush(list, value) {
+        var text = cleanPlateText(value);
+        if (text === "") return;
+        for (var i = 0; i < list.length; i++) {
+            if (list[i] === text) return;
+        }
+        list.push(text);
+    }
+
+    function plateDataFromRow(row, settings) {
+        var rawName = cleanPlateText(getByColumn(row, settings.nameField));
+        var name = cleanPlateText(getByColumn(row, "__nameFirstLast")) || cleanPlateText(getByColumn(row, "__formattedName")) || rawName;
+        if (rawName !== "" && name.indexOf(" ") === -1 && rawName.indexOf(" ") !== -1) {
+            name = rawName.toUpperCase();
+        }
+        var compPersonName = cleanPlateText(getByColumn(row, "__nameLastFirst")) || compPersonNameText(rawName || name);
+        var timePrefix = cleanPlateText(getByColumn(row, "__compTimePrefix"));
+        return {
+            rawName: rawName,
+            name: name,
+            compPersonName: compPersonName,
+            timePrefix: timePrefix,
+            position: cleanPlateText(getByColumn(row, settings.positionField)),
+            photoPath: cleanPlateText(getByColumn(row, "__photoLocalPath")),
+            compName: buildOutputCompName(settings, compPersonName, timePrefix)
+        };
+    }
+
+    function personAliasKey(value) {
+        var parts = cleanCompPersonNameText(value).split(/\s+/);
+        if (parts.length < 2) return normalizeKey(value);
+        var surname = parts[0];
+        var first = parts[1];
+        var initial = first.toUpperCase().replace(/[^A-ZА-ЯЁ]/g, "").charAt(0);
+        if (initial === "") initial = first.charAt(0);
+        return normalizeKey(surname + "_" + initial);
+    }
+
+    function timeSortKey(value) {
+        var text = cleanPlateText(value);
+        var match = text.match(/(\d{1,2})-(\d{2})/);
+        if (!match) return 999999;
+        return parseInt(match[1], 10) * 60 + parseInt(match[2], 10);
+    }
+
+    function removeAllLayers(comp) {
+        for (var i = comp.numLayers; i >= 1; i--) {
+            try { comp.layer(i).remove(); } catch (e) {}
+        }
+    }
+
+    function makeLinkedPlateComp(masterComp, targetFolder, compName, sourceComp) {
+        var comp = masterComp.duplicate();
+        comp.parentFolder = targetFolder;
+        comp.name = compName;
+        removeAllLayers(comp);
+        var layer = comp.layers.add(sourceComp);
+        try { layer.startTime = 0; } catch (e1) {}
+        try { layer.property("ADBE Transform Group").property("ADBE Position").setValue([comp.width / 2, comp.height / 2]); } catch (e2) {}
+        return comp;
+    }
+
+    function possibleExistingCompNames(settings, plateData) {
+        var names = [];
+        uniqueNamePush(names, plateData.compName);
+        uniqueNamePush(names, buildOutputCompName(settings, plateData.rawName, plateData.timePrefix));
+        uniqueNamePush(names, buildOutputCompName(settings, plateData.name, plateData.timePrefix));
+        uniqueNamePush(names, buildOutputCompName(settings, compPersonNameText(plateData.rawName), plateData.timePrefix));
+        uniqueNamePush(names, buildOutputCompName(settings, compPersonNameText(plateData.name), plateData.timePrefix));
+
+        var prefix = cleanPlateText(settings.compPrefix) || "Визитка";
+        var delimiter = settings.delimiter || "_";
+        if (plateData.rawName !== "") {
+            uniqueNamePush(names, prefix + delimiter + safeCompText(plateData.rawName, delimiter));
+            uniqueNamePush(names, prefix + delimiter + safeCompText(plateData.rawName.replace(/\s+/g, ""), delimiter));
+        }
+        return names;
+    }
+
+    var PERSON_META_MARKER = "SHEET2COMP_PERSON_META";
+
+    function jsonEncodeObject(value) {
+        if (typeof JSON !== "undefined" && JSON.stringify) return JSON.stringify(value);
+        var parts = [];
+        for (var key in value) {
+            if (value.hasOwnProperty(key)) {
+                parts.push("\"" + key + "\":\"" + String(value[key] || "").replace(/\\/g, "\\\\").replace(/"/g, "\\\"").replace(/\r/g, "\\r").replace(/\n/g, "\\n") + "\"");
+            }
+        }
+        return "{" + parts.join(",") + "}";
+    }
+
+    function jsonDecodeObject(text) {
+        if (!text) return null;
+        try {
+            if (typeof JSON !== "undefined" && JSON.parse) return JSON.parse(text);
+            return eval("(" + text + ")");
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function normalizeMetaPart(value) {
+        return cleanPlateText(value).replace(/ё/g, "е").toLowerCase();
+    }
+
+    function plateStableKey(plateData) {
+        var person = personAliasKey(plateData.compPersonName || plateData.name || plateData.rawName);
+        var time = normalizeMetaPart(plateData.timePrefix);
+        return (time !== "" ? time + "|" : "") + person;
+    }
+
+    function plateSignature(plateData) {
+        return [
+            normalizeMetaPart(plateData.name),
+            normalizeMetaPart(plateData.position),
+            normalizeMetaPart(plateData.photoPath)
+        ].join("|");
+    }
+
+    function buildPlateMeta(settings, plateData) {
+        return {
+            kind: "person-plate",
+            version: "1",
+            key: plateStableKey(plateData),
+            expectedCompName: plateData.compName,
+            name: plateData.name,
+            position: plateData.position,
+            photoPath: plateData.photoPath,
+            signature: plateSignature(plateData),
+            updatedAt: (new Date()).toISOString ? (new Date()).toISOString() : String(new Date())
+        };
+    }
+
+    function readPlateMeta(comp) {
+        var comment = String(comp.comment || "");
+        var pattern = new RegExp("\\[" + PERSON_META_MARKER + "\\]([\\s\\S]*?)\\[\\/" + PERSON_META_MARKER + "\\]");
+        var match = comment.match(pattern);
+        return match ? jsonDecodeObject(match[1]) : null;
+    }
+
+    function writePlateMeta(comp, meta) {
+        var comment = String(comp.comment || "");
+        var pattern = new RegExp("\\n?\\[" + PERSON_META_MARKER + "\\][\\s\\S]*?\\[\\/" + PERSON_META_MARKER + "\\]", "g");
+        comment = comment.replace(pattern, "");
+        comp.comment = trimText(comment + "\n[" + PERSON_META_MARKER + "]" + jsonEncodeObject(meta) + "[/" + PERSON_META_MARKER + "]");
+    }
+
+    function compLoosePlateKey(comp, settings) {
+        var delimiter = settings.delimiter || "_";
+        var name = cleanPlateText(comp.name);
+        var parts = name.split(delimiter);
+        if (parts.length < 2) return "";
+        var time = "";
+        var person = "";
+        if (parts[0].match(/^\d{1,2}-\d{2}/)) {
+            time = normalizeMetaPart(parts[0]);
+            person = parts.slice(1).join(" ");
+        } else {
+            person = parts.slice(1).join(" ");
+        }
+        var personKey = personAliasKey(person);
+        return (time !== "" ? time + "|" : "") + personKey;
+    }
+
+    function findPlateComp(settings, plateData, targetFolder, masterComp) {
+        var wantedKey = plateStableKey(plateData);
+        for (var i = 1; i <= app.project.numItems; i++) {
+            var item = app.project.item(i);
+            if (!(item instanceof CompItem) || item === masterComp || item.parentFolder !== targetFolder) continue;
+            var meta = readPlateMeta(item);
+            if (meta && meta.kind === "person-plate" && meta.key === wantedKey) {
+                return { comp: item, method: "meta", meta: meta };
+            }
+        }
+
+        var possibleNames = possibleExistingCompNames(settings, plateData);
+        var byName = findFirstCompByNamesInFolder(possibleNames, targetFolder, masterComp);
+        if (byName) return { comp: byName, method: "name", meta: readPlateMeta(byName) };
+
+        for (var c = 1; c <= app.project.numItems; c++) {
+            var comp = app.project.item(c);
+            if (!(comp instanceof CompItem) || comp === masterComp || comp.parentFolder !== targetFolder) continue;
+            if (compLoosePlateKey(comp, settings) === wantedKey) {
+                return { comp: comp, method: "loose-name", meta: readPlateMeta(comp) };
+            }
+        }
+        return null;
+    }
+
+    function getCompTextValue(comp, layerName, layerIndexText) {
+        var layer = findTextLayer(comp, layerName, layerIndexText);
+        return layer ? cleanPlateText(getTextLayerText(layer)) : "";
+    }
+
+    function shouldRenameMatchedComp(match, plateData) {
+        if (!match || !match.comp || match.comp.name === plateData.compName) return false;
+        if (match.method === "name") return true;
+        if (match.method === "meta" && match.meta && match.comp.name === match.meta.expectedCompName) return true;
+        return false;
+    }
+
+    function describePlateDiff(comp, settings, plateData, meta) {
+        var changes = [];
+        var currentName = getCompTextValue(comp, settings.nameLayer, settings.nameLayerIndex);
+        var currentPosition = getCompTextValue(comp, settings.positionLayer, settings.positionLayerIndex);
+        if (normalizeMetaPart(currentName) !== normalizeMetaPart(plateData.name)) {
+            changes.push("имя: \"" + currentName + "\" -> \"" + plateData.name + "\"");
+        }
+        if (normalizeMetaPart(currentPosition) !== normalizeMetaPart(plateData.position)) {
+            changes.push("должность: \"" + currentPosition + "\" -> \"" + plateData.position + "\"");
+        }
+        if (meta && normalizeMetaPart(meta.photoPath) !== normalizeMetaPart(plateData.photoPath) && plateData.photoPath !== "") {
+            changes.push("фото: обновить файл");
+        }
+        return changes;
     }
 
     function findCompsByNameInFolder(name, folder, exceptComp) {
@@ -481,6 +867,62 @@
             }
         }
         return matches;
+    }
+
+    function findFirstCompByNamesInFolder(names, folder, exceptComp) {
+        for (var n = 0; n < names.length; n++) {
+            var matches = findCompsByNameInFolder(names[n], folder, exceptComp);
+            if (matches.length > 0) return matches[0];
+        }
+        return null;
+    }
+
+    function findCompByName(name) {
+        var wanted = cleanPlateText(name);
+        if (wanted === "") return null;
+        for (var i = 1; i <= app.project.numItems; i++) {
+            var item = app.project.item(i);
+            if (item instanceof CompItem && cleanPlateText(item.name) === wanted) {
+                return item;
+            }
+        }
+        return null;
+    }
+
+    function findOrCreateFolder(parentFolder, folderName) {
+        var cleanName = cleanPlateText(folderName);
+        var parent = parentFolder || app.project.rootFolder;
+        if (cleanName === "") return parent;
+        for (var i = 1; i <= app.project.numItems; i++) {
+            var item = app.project.item(i);
+            if (item instanceof FolderItem && item.parentFolder === parent && item.name === cleanName) {
+                return item;
+            }
+        }
+        var folder = app.project.items.addFolder(cleanName);
+        folder.parentFolder = parent;
+        return folder;
+    }
+
+    function targetFolderForMaster(masterComp, settings) {
+        var parent = masterComp.parentFolder || app.project.rootFolder;
+        return findOrCreateFolder(parent, settings.targetFolderName);
+    }
+
+    function collectProjectComps() {
+        var comps = [];
+        for (var i = 1; i <= app.project.numItems; i++) {
+            var item = app.project.item(i);
+            if (item instanceof CompItem) comps.push(item);
+        }
+        comps.sort(function(a, b) {
+            var an = String(a.name).toLowerCase();
+            var bn = String(b.name).toLowerCase();
+            if (an < bn) return -1;
+            if (an > bn) return 1;
+            return 0;
+        });
+        return comps;
     }
 
     function removeComps(items) {
@@ -849,13 +1291,17 @@
             return;
         }
 
-        var masterComp = app.project.activeItem;
-        if (!masterComp || !(masterComp instanceof CompItem)) {
-            alert("Выделите композицию-шаблон в панели Project.", SCRIPT_NAME);
+        var activeComp = app.project.activeItem && app.project.activeItem instanceof CompItem ? app.project.activeItem : null;
+        var projectComps = collectProjectComps();
+        if (projectComps.length === 0) {
+            alert("В проекте нет композиций. Создайте или импортируйте композицию-шаблон.", SCRIPT_NAME);
             return;
         }
 
         var settings = loadSettings();
+        if (cleanPlateText(settings.templateCompName) === "" && activeComp) {
+            settings.templateCompName = activeComp.name;
+        }
         var runtime = loadRuntimeConfig();
         var win = new Window("palette", "Плашки и визитки: имя, должность, фото", undefined, { resizeable: true });
         win.orientation = "column";
@@ -936,6 +1382,31 @@
         createTab.margins = 10;
         createTab.spacing = 8;
 
+        var templateRow = createTab.add("group");
+        templateRow.orientation = "row";
+        templateRow.alignChildren = ["left", "center"];
+        templateRow.spacing = 8;
+        var templateLabel = templateRow.add("statictext", undefined, "Композиция-шаблон:");
+        templateLabel.preferredSize.width = 170;
+        var ddlTemplateComp = templateRow.add("dropdownlist", undefined, []);
+        ddlTemplateComp.preferredSize.width = 260;
+        var btnUseActiveTemplate = templateRow.add("button", undefined, "Активная");
+        btnUseActiveTemplate.preferredSize.width = 90;
+
+        function refreshTemplateDropdown(preferredName) {
+            ddlTemplateComp.removeAll();
+            var preferred = cleanPlateText(preferredName);
+            var selectedIndex = -1;
+            for (var c = 0; c < projectComps.length; c++) {
+                var item = ddlTemplateComp.add("item", projectComps[c].name);
+                if (cleanPlateText(projectComps[c].name) === preferred) selectedIndex = c;
+            }
+            if (selectedIndex < 0 && projectComps.length > 0) selectedIndex = 0;
+            if (selectedIndex >= 0) ddlTemplateComp.selection = selectedIndex;
+        }
+
+        refreshTemplateDropdown(settings.templateCompName);
+
         var typeRow = createTab.add("group");
         typeRow.orientation = "row";
         typeRow.alignChildren = ["left", "center"];
@@ -952,6 +1423,7 @@
 
         var edtPrefix = addLabeledEdit(createTab, "Префикс композиций:", initialCompPrefix, 170, 180);
         var edtDelimiter = addLabeledEdit(createTab, "Разделитель:", settings.delimiter, 170, 80);
+        var edtTargetFolder = addLabeledEdit(createTab, "Папка композиций:", settings.targetFolderName || "", 170, 180);
         var chkFit = createTab.add("checkbox", undefined, "Заполнять фото по размеру плейсхолдера");
         chkFit.value = settings.fitPhotoToPlaceholder;
         var chkRecreate = createTab.add("checkbox", undefined, "Пересоздать уже созданные композиции");
@@ -983,14 +1455,26 @@
             }
         };
 
+        btnUseActiveTemplate.onClick = function() {
+            var currentActive = app.project.activeItem && app.project.activeItem instanceof CompItem ? app.project.activeItem : null;
+            if (!currentActive) {
+                alert("Сейчас активная композиция не выбрана. Выберите композицию в Project или Timeline.", SCRIPT_NAME);
+                return;
+            }
+            projectComps = collectProjectComps();
+            refreshTemplateDropdown(currentActive.name);
+        };
+
         var buttons = win.add("group");
         buttons.orientation = "row";
         buttons.alignChildren = ["fill", "center"];
         var btnSave = buttons.add("button", undefined, "Сохранить");
         var btnCheck = buttons.add("button", undefined, "Проверить");
+        var btnNormalize = buttons.add("button", undefined, "Обновить");
         var btnCreate = buttons.add("button", undefined, "Создать");
         btnSave.preferredSize.width = 120;
         btnCheck.preferredSize.width = 120;
+        btnNormalize.preferredSize.width = 150;
         btnCreate.preferredSize.width = 160;
 
         function collectSettings() {
@@ -1003,6 +1487,7 @@
             settings.photoField = edtPhotoField.text;
             settings.shiftField = edtShiftField.text;
             settings.shiftFilter = edtShiftFilter.text;
+            settings.templateCompName = ddlTemplateComp.selection ? ddlTemplateComp.selection.text : "";
             settings.nameLayer = edtNameLayer.text;
             settings.nameLayerIndex = edtNameIndex.text;
             settings.positionLayer = edtPosLayer.text;
@@ -1015,6 +1500,7 @@
             settings.compPrefix = edtPrefix.text;
             settings.photoCompPrefix = "PHOTO";
             settings.delimiter = edtDelimiter.text;
+            settings.targetFolderName = edtTargetFolder.text;
             settings.photoFolderPath = edtPhotoFolder.text;
             settings.autoImportPhotos = chkAutoImportPhotos.value;
             settings.requirePhotoPrecomp = settings.graphicType === "Визитка";
@@ -1030,12 +1516,41 @@
         };
 
         btnCheck.onClick = function() {
-            checkData(collectSettings(), runtime);
+            var currentSettings = collectSettings();
+            var masterComp = findCompByName(currentSettings.templateCompName);
+            if (!masterComp) {
+                alert("Не найдена композиция-шаблон:\n" + currentSettings.templateCompName + "\n\nВыберите шаблон во вкладке \"Создание\".", SCRIPT_NAME);
+                return;
+            }
+            var templateWarnings = validateTemplate(masterComp, currentSettings);
+            if (templateWarnings.length > 0) {
+                if (!confirm("Предупреждения шаблона:\n\n" + templateWarnings.join("\n") + "\n\nВсе равно проверить данные?")) {
+                    return;
+                }
+            }
+            checkData(currentSettings, runtime);
         };
 
         btnCreate.onClick = function() {
-            saveSettings(collectSettings());
-            generatePlates(masterComp, settings, runtime);
+            var currentSettings = collectSettings();
+            var masterComp = findCompByName(currentSettings.templateCompName);
+            if (!masterComp) {
+                alert("Не найдена композиция-шаблон:\n" + currentSettings.templateCompName + "\n\nВыберите шаблон во вкладке \"Создание\".", SCRIPT_NAME);
+                return;
+            }
+            saveSettings(currentSettings);
+            generatePlates(masterComp, currentSettings, runtime);
+        };
+
+        btnNormalize.onClick = function() {
+            var currentSettings = collectSettings();
+            var masterComp = findCompByName(currentSettings.templateCompName);
+            if (!masterComp) {
+                alert("Не найдена композиция-шаблон:\n" + currentSettings.templateCompName + "\n\nВыберите шаблон во вкладке \"Создание\".", SCRIPT_NAME);
+                return;
+            }
+            saveSettings(currentSettings);
+            normalizeExistingPlates(masterComp, currentSettings, runtime);
         };
 
         win.center();
@@ -1121,6 +1636,141 @@
         }
     }
 
+    function normalizeExistingPlates(masterComp, settings, runtime) {
+        try {
+            var result = downloadData(settings, runtime);
+            var rows = result.rows;
+            if (!rows || rows.length === 0) throw new Error("Данные пусты.");
+
+            var targetFolder = targetFolderForMaster(masterComp, settings);
+            var renamed = 0;
+            var updatedText = 0;
+            var updatedPhoto = 0;
+            var unchanged = 0;
+            var conflicts = 0;
+            var notFound = 0;
+            var skippedByShift = 0;
+            var textErrors = [];
+            var seenTargets = {};
+            var planned = [];
+
+            for (var i = 0; i < rows.length; i++) {
+                var row = normalizeRow(rows[i]);
+                if (!rowMatchesShiftFilter(row, settings)) {
+                    skippedByShift++;
+                    continue;
+                }
+
+                var plateData = plateDataFromRow(row, settings);
+                if (plateData.name === "" || plateData.name.indexOf("#") === 0 || plateData.name.indexOf("#VALUE!") !== -1) {
+                    notFound++;
+                    continue;
+                }
+                if (seenTargets[plateData.compName] === true) {
+                    conflicts++;
+                    continue;
+                }
+                seenTargets[plateData.compName] = true;
+
+                var match = findPlateComp(settings, plateData, targetFolder, masterComp);
+                if (!match || !match.comp) {
+                    notFound++;
+                    continue;
+                }
+
+                var comp = match.comp;
+                var changes = describePlateDiff(comp, settings, plateData, match.meta);
+                if (shouldRenameMatchedComp(match, plateData)) {
+                    changes.unshift("имя композиции: \"" + comp.name + "\" -> \"" + plateData.compName + "\"");
+                }
+                planned.push({ comp: comp, plateData: plateData, meta: match.meta, changes: changes, method: match.method });
+            }
+
+            var changedCount = 0;
+            var preview = [];
+            for (var p = 0; p < planned.length; p++) {
+                if (planned[p].changes.length === 0) {
+                    unchanged++;
+                } else {
+                    changedCount++;
+                    if (preview.length < 12) preview.push(planned[p].comp.name + "\n  " + planned[p].changes.join("\n  "));
+                }
+            }
+
+            var confirmMessage = "План обновления плашек\n\n" +
+                "Будут обновлены: " + changedCount + "\n" +
+                "Без изменений: " + unchanged + "\n" +
+                "Не найдены: " + notFound + "\n" +
+                "Конфликты/дубликаты: " + conflicts + "\n" +
+                "Пропущено по смене: " + skippedByShift + "\n" +
+                "Всего строк: " + rows.length + "\n\n" +
+                (preview.length > 0 ? "Что изменится:\n" + preview.join("\n\n") + "\n\n" : "") +
+                "Применить эти изменения?";
+            if (changedCount === 0) {
+                alert(confirmMessage.replace("\n\nПрименить эти изменения?", ""), SCRIPT_NAME);
+                return;
+            }
+            if (!confirm(confirmMessage)) return;
+
+            app.beginUndoGroup("Update Person Plates");
+            for (var u = 0; u < planned.length; u++) {
+                var item = planned[u];
+                if (item.changes.length === 0) {
+                    writePlateMeta(item.comp, buildPlateMeta(settings, item.plateData));
+                    continue;
+                }
+
+                if (shouldRenameMatchedComp(item, item.plateData)) {
+                    var targetMatches = findCompsByNameInFolder(item.plateData.compName, targetFolder, masterComp);
+                    if (targetMatches.length > 0 && targetMatches[0] !== item.comp) {
+                        conflicts++;
+                    } else {
+                        item.comp.name = item.plateData.compName;
+                        renamed++;
+                    }
+                }
+
+                try {
+                    var nameLayer = setTextLayer(item.comp, settings.nameLayer, settings.nameLayerIndex, item.plateData.name);
+                    applyNameExpression(nameLayer);
+                    var positionLayer = setTextLayer(item.comp, settings.positionLayer, settings.positionLayerIndex, item.plateData.position);
+                    applyPositionExpression(positionLayer, "должность не задана");
+                    updatedText++;
+                } catch (textError) {
+                    if (textErrors.length < 8) textErrors.push(item.comp.name + ": не обновлен текст (" + textError.toString() + ")");
+                }
+
+                if (item.meta && normalizeMetaPart(item.meta.photoPath) !== normalizeMetaPart(item.plateData.photoPath) && item.plateData.photoPath !== "") {
+                    try {
+                        replacePhotoLayer(item.comp, settings, item.plateData.photoPath, "000", item.plateData.name);
+                        updatedPhoto++;
+                    } catch (photoError) {
+                        if (textErrors.length < 8) textErrors.push(item.comp.name + ": не обновлено фото (" + photoError.toString() + ")");
+                    }
+                }
+                writePlateMeta(item.comp, buildPlateMeta(settings, item.plateData));
+            }
+            app.endUndoGroup();
+
+            alert(
+                "Обновление готово.\n\n" +
+                "Переименовано композиций: " + renamed + "\n" +
+                "Обновлено композиций с текстом: " + updatedText + "\n" +
+                "Обновлено фото: " + updatedPhoto + "\n" +
+                "Без изменений: " + unchanged + "\n" +
+                "Конфликты имен/дубликаты: " + conflicts + "\n" +
+                "Не найдены в проекте: " + notFound + "\n" +
+                "Пропущено по смене: " + skippedByShift + "\n" +
+                "Всего строк: " + rows.length + "\n\n" +
+                (textErrors.length > 0 ? "Ошибки текста:\n" + textErrors.join("\n") : ""),
+                SCRIPT_NAME
+            );
+        } catch (e) {
+            try { app.endUndoGroup(); } catch (undoError) {}
+            alert("Ошибка обновления:\n" + e.toString() + "\nСтрока: " + e.line, SCRIPT_NAME);
+        }
+    }
+
     function generatePlates(masterComp, settings, runtime) {
         app.beginUndoGroup("Person Plates from Sheet");
         try {
@@ -1130,16 +1780,19 @@
             var rows = result.rows;
             if (!rows || rows.length === 0) throw new Error("Данные пусты.");
 
-            var targetFolder = masterComp.parentFolder || app.project.rootFolder;
+            var targetFolder = targetFolderForMaster(masterComp, settings);
             var created = 0;
             var skipped = 0;
             var skippedExisting = 0;
             var recreated = 0;
             var noPhoto = 0;
+            var linkedPlates = 0;
             var skippedByShift = 0;
             var textErrors = [];
             var photoErrors = [];
             var namesCreatedThisRun = {};
+            var baseCompByPerson = {};
+            var plateRows = [];
 
             for (var i = 0; i < rows.length; i++) {
                 var row = normalizeRow(rows[i]);
@@ -1148,16 +1801,31 @@
                     continue;
                 }
 
-                var name = cleanPlateText(getByColumn(row, "__nameFirstLast")) || cleanPlateText(getByColumn(row, "__formattedName"));
-                var position = cleanPlateText(getByColumn(row, settings.positionField));
-                var photoPath = cleanPlateText(getByColumn(row, "__photoLocalPath"));
+                var plateData = plateDataFromRow(row, settings);
+                plateData.rowIndex = i;
+                plateData.personKey = personAliasKey(plateData.compPersonName || plateData.name || plateData.rawName);
+                plateRows.push(plateData);
+            }
+
+            plateRows.sort(function(a, b) {
+                var at = timeSortKey(a.timePrefix);
+                var bt = timeSortKey(b.timePrefix);
+                if (at !== bt) return at - bt;
+                return a.rowIndex - b.rowIndex;
+            });
+
+            for (var i = 0; i < plateRows.length; i++) {
+                var plateData = plateRows[i];
+                var name = plateData.name;
+                var position = plateData.position;
+                var photoPath = plateData.photoPath;
 
                 if (name === "" || name.indexOf("#") === 0 || name.indexOf("#VALUE!") !== -1) {
                     skipped++;
                     continue;
                 }
 
-                var compName = buildOutputCompName(settings, name);
+                var compName = plateData.compName;
                 if (namesCreatedThisRun[compName] === true) {
                     skippedExisting++;
                     continue;
@@ -1169,49 +1837,65 @@
                         removeComps(existingComps);
                         recreated += existingComps.length;
                     } else {
+                        if (!baseCompByPerson[plateData.personKey]) baseCompByPerson[plateData.personKey] = existingComps[0];
+                        writePlateMeta(existingComps[0], buildPlateMeta(settings, plateData));
                         skippedExisting++;
                         continue;
                     }
                 }
 
-                var comp = masterComp.duplicate();
-                comp.parentFolder = targetFolder;
                 var plateNumber = ("000" + (created + 1)).slice(-3);
-                comp.name = compName;
-
-                try {
-                    setTextLayer(comp, settings.nameLayer, settings.nameLayerIndex, name);
-                } catch (nameTextError) {
-                    if (textErrors.length < 8) textErrors.push(name + ": не записано имя (" + nameTextError.toString() + ")");
-                }
-
-                try {
-                    setTextLayer(comp, settings.positionLayer, settings.positionLayerIndex, position);
-                } catch (positionTextError) {
-                    if (textErrors.length < 8) textErrors.push(name + ": не записана должность (" + positionTextError.toString() + ")");
-                }
-
-                if (settings.autoImportPhotos === false && isBusinessCardMode(settings)) {
-                    try {
-                        duplicatePhotoPrecompOnly(comp, settings, plateNumber, name);
-                    } catch (manualPhotoError) {
-                        if (photoErrors.length < 8) photoErrors.push(name + ": " + manualPhotoError.toString());
-                    }
-                    noPhoto++;
-                } else if (photoPath !== "") {
-                    try {
-                        replacePhotoLayer(comp, settings, photoPath, plateNumber, name);
-                    } catch (photoError) {
-                        noPhoto++;
-                        if (photoErrors.length < 8) photoErrors.push(name + ": " + photoError.toString());
-                    }
+                var sourceBaseComp = baseCompByPerson[plateData.personKey];
+                var comp;
+                if (settings.graphicType === "Плашка" && sourceBaseComp) {
+                    comp = makeLinkedPlateComp(masterComp, targetFolder, compName, sourceBaseComp);
+                    linkedPlates++;
                 } else {
-                    noPhoto++;
+                    comp = masterComp.duplicate();
+                    comp.parentFolder = targetFolder;
+                    comp.name = compName;
+
+                    try {
+                        var nameLayer = setTextLayer(comp, settings.nameLayer, settings.nameLayerIndex, name);
+                        applyNameExpression(nameLayer);
+                    } catch (nameTextError) {
+                        if (textErrors.length < 8) textErrors.push(name + ": не записано имя (" + nameTextError.toString() + ")");
+                    }
+
+                    try {
+                        var positionLayer = setTextLayer(comp, settings.positionLayer, settings.positionLayerIndex, position);
+                        applyPositionExpression(positionLayer, "должность не задана");
+                    } catch (positionTextError) {
+                        if (textErrors.length < 8) textErrors.push(name + ": не записана должность (" + positionTextError.toString() + ")");
+                    }
+
+                    if (settings.autoImportPhotos === false && isBusinessCardMode(settings)) {
+                        try {
+                            duplicatePhotoPrecompOnly(comp, settings, plateNumber, name);
+                        } catch (manualPhotoError) {
+                            if (photoErrors.length < 8) photoErrors.push(name + ": " + manualPhotoError.toString());
+                        }
+                        noPhoto++;
+                    } else if (photoPath !== "") {
+                        try {
+                            replacePhotoLayer(comp, settings, photoPath, plateNumber, name);
+                        } catch (photoError) {
+                            noPhoto++;
+                            if (photoErrors.length < 8) photoErrors.push(name + ": " + photoError.toString());
+                        }
+                    } else {
+                        noPhoto++;
+                    }
+
+                    if (!baseCompByPerson[plateData.personKey]) {
+                        baseCompByPerson[plateData.personKey] = comp;
+                    }
                 }
 
                 if (settings.addToRenderQueue) {
                     app.project.renderQueue.items.add(comp);
                 }
+                writePlateMeta(comp, buildPlateMeta(settings, plateData));
                 namesCreatedThisRun[compName] = true;
                 created++;
             }
@@ -1223,6 +1907,7 @@
                 "Уже были, оставлены без изменений: " + skippedExisting + "\n" +
                 "Пропущено строк: " + skipped + "\n" +
                 "Пропущено по смене: " + skippedByShift + "\n" +
+                "Повторных плашек-ссылок: " + linkedPlates + "\n" +
                 (settings.autoImportPhotos === false ? "Фото: автоматическое подтягивание выключено\n" : "Без фото: " + noPhoto + "\n") +
                 "Всего строк: " + rows.length + "\n\n" +
                 (templateWarnings.length > 0 ? "Предупреждения шаблона:\n" + templateWarnings.join("\n") + "\n\n" : "") +
