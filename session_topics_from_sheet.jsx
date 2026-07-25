@@ -54,6 +54,172 @@
         return name;
     }
 
+    function cleanProjectName(value) {
+        var text = trimString(value || "");
+        text = text.replace(/[\\\/:\*\?"<>\|#%\{\}\[\]]/g, "-");
+        text = text.replace(/\s+/g, " ");
+        return trimString(text);
+    }
+
+    function formatDayFolderName(value) {
+        var text = trimString(value || "");
+        if (text === "") return "";
+        var match = text.match(/(?:день\s*)?0*(\d+)/i);
+        if (match) {
+            var num = parseInt(match[1], 10);
+            if (!isNaN(num)) return "день " + (num < 10 ? "0" : "") + num;
+        }
+        return cleanProjectName(text);
+    }
+
+    function dayNumber2(value) {
+        var text = trimString(value || "");
+        var match = text.match(/(?:день\s*)?0*(\d+)/i);
+        if (!match) return "";
+        var num = parseInt(match[1], 10);
+        if (isNaN(num)) return "";
+        return num < 10 ? "0" + num : String(num);
+    }
+
+    function dayNumber(value) {
+        var text = trimString(value || "");
+        var match = text.match(/(?:день\s*)?0*(\d+)/i);
+        if (!match) return "";
+        var num = parseInt(match[1], 10);
+        return isNaN(num) ? "" : String(num);
+    }
+
+    function outputDayTitle(value) {
+        var number = dayNumber2(value);
+        return number !== "" ? "День " + number : cleanProjectName(value);
+    }
+
+    function extensionFromName(name) {
+        var text = String(name || "");
+        try {
+            text = File.decode(text);
+        } catch (e) {}
+        var match = text.match(/(\.[^\.\/\\]+)$/);
+        return match ? match[1] : "";
+    }
+
+    function outputExtension(outputModule, settings) {
+        var ext = outputModule && outputModule.file ? extensionFromName(outputModule.file.name) : "";
+        if (ext.indexOf("[") !== -1 || ext.indexOf("]") !== -1 || ext.indexOf("?") !== -1) ext = "";
+        if (ext === "" && settings && trimString(settings.outputModuleTemplate || "").toLowerCase().indexOf("dvx") !== -1) return ".mov";
+        return ext || ".mov";
+    }
+
+    function outputCompNameToken(value) {
+        var text = trimString(value || "");
+        text = text.replace(/\s+/g, " ");
+        return trimString(text) || "render";
+    }
+
+    function replaceAllText(text, token, value) {
+        return String(text || "").split(token).join(String(value || ""));
+    }
+
+    function renderTemplatePath(templateText, comp, context, extension) {
+        var ext = extension || ".mov";
+        var extNoDot = ext.charAt(0) === "." ? ext.substring(1) : ext;
+        var path = String(templateText || "");
+        path = replaceAllText(path, "[compName]", outputCompNameToken(comp.name));
+        path = replaceAllText(path, "[fileExtension]", extNoDot);
+        path = replaceAllText(path, "[shift]", cleanProjectName(context.shift));
+        path = replaceAllText(path, "[day]", formatDayFolderName(context.day));
+        path = replaceAllText(path, "[dayTitle]", outputDayTitle(context.day));
+        path = replaceAllText(path, "[dayNumber]", dayNumber(context.day));
+        path = replaceAllText(path, "[dayNumber2]", dayNumber2(context.day));
+        return path;
+    }
+
+    function ensureDiskFolderTree(folder) {
+        if (!folder || folder.exists) return;
+        var parent = folder.parent;
+        if (parent && !parent.exists) ensureDiskFolderTree(parent);
+        folder.create();
+    }
+
+    function encodedPathSegment(value) {
+        var text = String(value || "");
+        if (typeof File !== "undefined" && typeof File.encode === "function") return File.encode(text);
+        return encodeURIComponent(text);
+    }
+
+    function pathToAbsoluteUri(pathText) {
+        var text = String(pathText || "").replace(/\\/g, "/");
+        if (/^file:\/\//i.test(text)) return text;
+        var prefix = "";
+        if (text.indexOf("/") === 0) {
+            prefix = "file://";
+            text = text.substring(1);
+        }
+        var parts = text.split("/");
+        for (var i = 0; i < parts.length; i++) {
+            parts[i] = encodedPathSegment(parts[i]);
+        }
+        return prefix + "/" + parts.join("/");
+    }
+
+    function fileFromUnicodePath(fullPath, extension) {
+        var ext = extension || ".mov";
+        var uri = pathToAbsoluteUri(fullPath);
+        var splitIndex = uri.lastIndexOf("/");
+        if (splitIndex < 0) return new File(uri);
+
+        var folderUri = uri.substring(0, splitIndex);
+        var fileNameUri = uri.substring(splitIndex + 1);
+        var folder = new Folder(folderUri);
+        ensureDiskFolderTree(folder);
+
+        return new File(folderUri + "/" + fileNameUri);
+    }
+
+    function outputFileFromTemplate(templateText, comp, context, outputModule, settings) {
+        var template = trimString(templateText || "");
+        if (template === "") return null;
+        var ext = outputExtension(outputModule, settings);
+        var fullPath = renderTemplatePath(template, comp, context, ext);
+        return fileFromUnicodePath(fullPath, ext);
+    }
+
+    function applyOutputModuleTemplate(outputModule, templateName) {
+        var name = trimString(templateName || "");
+        if (name === "") return;
+        try {
+            outputModule.applyTemplate(name);
+        } catch (templateError) {
+            throw new Error("Не найден или не применился Output Module шаблон \"" + name + "\".");
+        }
+    }
+
+    function registerDeferredOutputTo(item, comp, settings, context) {
+        if (!$.global.__sheet2compPendingOutputTo) $.global.__sheet2compPendingOutputTo = [];
+        $.global.__sheet2compPendingOutputTo.push({
+            item: item,
+            comp: comp,
+            outputModuleTemplate: settings.outputModuleTemplate,
+            context: {
+                shift: context.shift,
+                day: context.day
+            }
+        });
+    }
+
+    function addCompToRenderQueue(comp, settings, context) {
+        var item = app.project.renderQueue.items.add(comp);
+        if ($.global.__sheet2compDeferOutputTo === true) {
+            registerDeferredOutputTo(item, comp, settings, context);
+            return item;
+        }
+        for (var j = 1; j <= item.numOutputModules; j++) {
+            var outputModule = item.outputModule(j);
+            applyOutputModuleTemplate(outputModule, settings.outputModuleTemplate);
+        }
+        return item;
+    }
+
     function outputCompNameForRecord(settings, record, number) {
         if (trimString(record.compName) !== "") {
             return sanitizeCompName(record.compName, true);
@@ -101,8 +267,7 @@
     function sessionCompName(venueName, title) {
         var cleanTitle = cleanTopic(title);
         if (cleanTitle === "") return "";
-        var cleanVenue = cleanVenueHeader(venueName);
-        return cleanVenue !== "" ? cleanVenue + "/" + cleanTitle : cleanTitle;
+        return cleanTitle;
     }
 
     function recordKey(record) {
@@ -171,6 +336,94 @@
             }
         }
         return null;
+    }
+
+    function findOrCreateFolder(parentFolder, folderName) {
+        var cleanName = cleanProjectName(folderName);
+        var parent = parentFolder || app.project.rootFolder;
+        if (cleanName === "") return parent;
+        for (var i = 1; i <= app.project.numItems; i++) {
+            var item = app.project.item(i);
+            if (item instanceof FolderItem && item.parentFolder === parent && item.name === cleanName) {
+                return item;
+            }
+        }
+        var folder = app.project.items.addFolder(cleanName);
+        folder.parentFolder = parent;
+        return folder;
+    }
+
+    function findOrCreateFolderPath(pathText) {
+        var text = trimString(pathText || "");
+        var folder = app.project.rootFolder;
+        if (text === "") return folder;
+        var parts = text.split(/[\/\\]+/);
+        for (var i = 0; i < parts.length; i++) {
+            var part = cleanProjectName(parts[i]);
+            if (part === "") continue;
+            folder = findOrCreateFolder(folder, part);
+        }
+        return folder;
+    }
+
+    function findCompByNameInFolderPath(compName, folderPath) {
+        var folder = findOrCreateFolderPath(folderPath);
+        for (var i = 1; i <= app.project.numItems; i++) {
+            var item = app.project.item(i);
+            if (isComp(item) && item.name === compName && item.parentFolder === folder) {
+                return item;
+            }
+        }
+        return null;
+    }
+
+    function targetFolderForRecord(settings, record) {
+        if (settings.routeByShiftDay === true) {
+            var root = findOrCreateFolderPath(settings.topicsRootPath || "!_COMPS/02_ЗАСТАВКА С ТЕМОЙ СЕССИИ");
+            var shift = cleanProjectName(record.shift || settings.shiftName) || "Без смены";
+            var day = formatDayFolderName(record.day) || "без дня";
+            return findOrCreateFolder(findOrCreateFolder(root, shift), day);
+        }
+        return app.project.rootFolder;
+    }
+
+    function folderAlreadyTracked(folders, folder) {
+        for (var i = 0; i < folders.length; i++) {
+            if (folders[i] === folder) return true;
+        }
+        return false;
+    }
+
+    function trackFolder(folders, folder) {
+        if (folder && !folderAlreadyTracked(folders, folder)) folders.push(folder);
+    }
+
+    function removeDuplicateCompsInFolders(folders, exceptComp) {
+        var removed = 0;
+        for (var f = 0; f < folders.length; f++) {
+            var folder = folders[f];
+            var keepByName = {};
+            var duplicates = [];
+            for (var i = 1; i <= app.project.numItems; i++) {
+                var item = app.project.item(i);
+                if (!isComp(item) || item === exceptComp || item.parentFolder !== folder) continue;
+                var key = normalizeKey(item.name);
+                if (key === "") continue;
+                if (keepByName[key]) {
+                    duplicates.push(item);
+                } else {
+                    keepByName[key] = item;
+                }
+            }
+
+            for (var d = duplicates.length - 1; d >= 0; d--) {
+                try {
+                    duplicates[d].remove();
+                    removed++;
+                } catch (removeDuplicateError) {}
+            }
+        }
+        return removed;
     }
 
     function getSourceTextProperty(layer) {
@@ -288,12 +541,16 @@
         var titleIndex = -1;
         var descIndex = -1;
         var compNameIndex = -1;
+        var dayIndex = -1;
+        var shiftIndex = -1;
 
         for (var i = 0; i < header.length; i++) {
             var name = trimString(stripBom(header[i]));
             if (name === titleColumnName) titleIndex = i;
             if (name === descColumnName) descIndex = i;
             if (name === DEFAULT_COMP_NAME_COLUMN) compNameIndex = i;
+            if (normalizeKey(name) === normalizeKey("ДЕНЬ")) dayIndex = i;
+            if (normalizeKey(name) === normalizeKey("Смена")) shiftIndex = i;
         }
 
         var startRow = 1;
@@ -312,8 +569,10 @@
             var title = row.length > titleIndex ? trimString(row[titleIndex]) : "";
             var desc = descIndex >= 0 && row.length > descIndex ? trimString(row[descIndex]) : "";
             var compName = compNameIndex >= 0 && row.length > compNameIndex ? trimString(row[compNameIndex]) : "";
+            var day = dayIndex >= 0 && row.length > dayIndex ? trimString(row[dayIndex]) : "";
+            var shift = shiftIndex >= 0 && row.length > shiftIndex ? trimString(row[shiftIndex]) : "";
             if (title !== "" || desc !== "") {
-                records.push({ title: title, description: desc, compName: compName, sourceKey: compName !== "" ? "comp:" + compName : "row:" + r });
+                records.push({ title: title, description: desc, compName: compName, day: day, shift: shift, sourceKey: compName !== "" ? "comp:" + compName : "row:" + r });
             }
         }
 
@@ -419,6 +678,8 @@
                 if (!record) continue;
                 record.compName = sessionCompName(venueNames[c], record.title);
                 record.sourceKey = "program:" + r + ":" + c;
+                record.day = "";
+                record.shift = "";
                 var key = recordKey(record);
                 if (seen[key]) continue;
                 seen[key] = true;
@@ -566,6 +827,14 @@
         return count;
     }
 
+    function pushUniqueComp(list, comp) {
+        if (!comp) return;
+        for (var i = 0; i < list.length; i++) {
+            if (list[i] === comp) return;
+        }
+        list.push(comp);
+    }
+
     function makeComps(settings) {
         var text = settings.sourceMode === "url" ? downloadUrl(settings.url) : readLocalFile(settings.file);
         var delimiter = settings.delimiter === "auto" ? guessDelimiter(text) : settings.delimiter;
@@ -587,7 +856,11 @@
             throw new Error("Открой проект After Effects.");
         }
 
-        var mainComp = findCompByName(settings.mainCompName);
+        var mainComp = null;
+        if (settings.mainCompFolderPath) {
+            mainComp = findCompByNameInFolderPath(settings.mainCompName, settings.mainCompFolderPath);
+        }
+        if (!mainComp) mainComp = findCompByName(settings.mainCompName);
         if (!mainComp) {
             throw new Error("Не найдена главная композиция \"" + settings.mainCompName + "\".");
         }
@@ -596,6 +869,7 @@
         var skipped = [];
         var updated = [];
         var renamed = [];
+        var queued = [];
         var conflicts = [];
         var maps = existingCompMaps(settings, mainComp);
         var nextNumber = countCompsWithPrefix(settings.namePrefix) + 1;
@@ -604,9 +878,11 @@
         var preview = [];
         var plannedCreates = 0;
         var plannedUpdates = 0;
+        var touchedFolders = [];
         try {
             for (var i = 0; i < records.length; i++) {
                 var record = records[i];
+                trackFolder(touchedFolders, targetFolderForRecord(settings, record));
                 var titleKey = normalizeKey(record.title);
                 var targetName = outputCompNameForRecord(settings, record, nextNumber);
                 var targetKey = normalizeKey(targetName);
@@ -614,7 +890,16 @@
                 var existingByMeta = maps.byMetaKey[key];
                 var existingByName = maps.byName[targetKey];
                 var existingByTitle = maps.byTitle[titleKey];
-                var existing = existingByMeta || existingByName || existingByTitle;
+                var candidates = [];
+                pushUniqueComp(candidates, existingByMeta);
+                pushUniqueComp(candidates, existingByName);
+                pushUniqueComp(candidates, existingByTitle);
+                if (candidates.length > 1) {
+                    conflicts.push(targetName);
+                    if (preview.length < 12) preview.push(targetName + "\n  конфликт: найдено несколько разных существующих композиций-кандидатов");
+                    continue;
+                }
+                var existing = candidates.length > 0 ? candidates[0] : null;
 
                 if (existing) {
                     var meta = readSessionMeta(existing);
@@ -636,8 +921,13 @@
                     }
 
                     if (changes.length === 0) {
-                        skipped.push(record.title);
-                        writeSessionMeta(existing, buildSessionMeta(record, targetName));
+                        if (settings.addExistingToRenderQueue === true && settings.addToRenderQueue === true) {
+                            planned.push({ action: "queue", comp: existing, record: record, targetName: targetName, changes: ["добавить существующую композицию в Render Queue"] });
+                            if (preview.length < 12) preview.push(existing.name + "\n  добавить существующую композицию в Render Queue");
+                        } else {
+                            skipped.push(record.title);
+                            writeSessionMeta(existing, buildSessionMeta(record, targetName));
+                        }
                     } else {
                         plannedUpdates++;
                         planned.push({ action: "update", comp: existing, record: record, targetName: targetName, changes: changes });
@@ -663,11 +953,31 @@
             "Всего найдено уникальных строк: " + records.length + "\n\n" +
             (preview.length > 0 ? "Что изменится:\n" + preview.join("\n\n") + "\n\n" : "") +
             "Применить эти изменения?";
-        if (planned.length === 0) {
-            return { created: created, updated: updated, skipped: skipped, renamed: renamed, conflicts: conflicts, total: records.length, savedTsvPath: savedTsvPath };
+        var planResult = {
+            created: created,
+            updated: updated,
+            skipped: skipped,
+            renamed: renamed,
+            queued: queued,
+            conflicts: conflicts,
+            duplicatesRemoved: 0,
+            total: records.length,
+            savedTsvPath: savedTsvPath,
+            plannedCreates: plannedCreates,
+            plannedUpdates: plannedUpdates,
+            preview: preview,
+            planMessage: confirmMessage
+        };
+        if (settings.planOnly === true) {
+            return planResult;
         }
-        if (!confirm(confirmMessage)) {
-            return { created: created, updated: updated, skipped: skipped, renamed: renamed, conflicts: conflicts, total: records.length, savedTsvPath: savedTsvPath };
+        if (planned.length === 0) {
+            var duplicatesOnlyRemoved = removeDuplicateCompsInFolders(touchedFolders, mainComp);
+            planResult.duplicatesRemoved = duplicatesOnlyRemoved;
+            return planResult;
+        }
+        if (settings.autoConfirm !== true && !confirm(confirmMessage)) {
+            return planResult;
         }
 
         app.beginUndoGroup(SCRIPT_NAME);
@@ -678,14 +988,16 @@
                 if (item.action === "create") {
                     comp = mainComp.duplicate();
                     comp.name = item.targetName;
+                    comp.parentFolder = targetFolderForRecord(settings, item.record);
+                    trackFolder(touchedFolders, comp.parentFolder);
                     setTextLayer(comp, settings.titleLayerName, item.record.title);
                     setTextLayer(comp, settings.descLayerName, item.record.description);
 
                     if (settings.addToRenderQueue) {
-                        app.project.renderQueue.items.add(comp);
+                        addCompToRenderQueue(comp, settings, { shift: item.record.shift || settings.shiftName, day: item.record.day });
                     }
                     created.push(comp.name);
-                } else {
+                } else if (item.action === "update") {
                     comp = item.comp;
                     var oldName = comp.name;
                     if (oldName !== item.targetName) {
@@ -697,7 +1009,18 @@
                     }
                     setTextLayer(comp, settings.titleLayerName, item.record.title);
                     setTextLayer(comp, settings.descLayerName, item.record.description);
+                    if (settings.addToRenderQueue) {
+                        addCompToRenderQueue(comp, settings, { shift: item.record.shift || settings.shiftName, day: item.record.day });
+                        queued.push(comp.name);
+                    }
                     updated.push(comp.name);
+                } else if (item.action === "queue") {
+                    comp = item.comp;
+                    if (settings.addToRenderQueue) {
+                        addCompToRenderQueue(comp, settings, { shift: item.record.shift || settings.shiftName, day: item.record.day });
+                        queued.push(comp.name);
+                    }
+                    skipped.push(item.record.title);
                 }
                 writeSessionMeta(comp, buildSessionMeta(item.record, item.targetName));
 
@@ -705,12 +1028,13 @@
                 maps.byTitle[normalizeKey(item.record.title)] = comp;
                 maps.byMetaKey[recordKey(item.record)] = comp;
             }
+            var duplicatesRemoved = removeDuplicateCompsInFolders(touchedFolders, mainComp);
         } catch (err) {
             app.endUndoGroup();
             throw err;
         }
         app.endUndoGroup();
-        return { created: created, updated: updated, skipped: skipped, renamed: renamed, conflicts: conflicts, total: records.length, savedTsvPath: savedTsvPath };
+        return { created: created, updated: updated, skipped: skipped, renamed: renamed, queued: queued, conflicts: conflicts, duplicatesRemoved: duplicatesRemoved, total: records.length, savedTsvPath: savedTsvPath };
     }
 
     function buildUI(thisObj) {
@@ -722,6 +1046,9 @@
         win.alignChildren = ["fill", "top"];
         win.spacing = 8;
         win.margins = 12;
+
+        var intro = win.add("statictext", undefined, "Порядок работы: выбери источник, проверь план обновления и только потом применяй импорт.");
+        intro.characters = 82;
 
         var sourcePanel = win.add("panel", undefined, "Источник");
         sourcePanel.orientation = "column";
@@ -786,7 +1113,7 @@
         var runGroup = win.add("group");
         runGroup.orientation = "row";
         runGroup.alignment = ["right", "top"];
-        var runButton = runGroup.add("button", undefined, "Создать композиции");
+        var runButton = runGroup.add("button", undefined, "Создать/обновить");
 
         function refreshMode() {
             fileText.enabled = fileMode.value;
@@ -868,6 +1195,7 @@
                     "\nПереименовано старых: " + result.renamed.length +
                     "\nУже были, пропущены: " + result.skipped.length +
                     "\nКонфликты имен: " + result.conflicts.length +
+                    "\nДубликатов композиций удалено: " + (result.duplicatesRemoved || 0) +
                     "\nВсего найдено уникальных строк: " + result.total + ".";
                 if (result.savedTsvPath !== "") {
                     message += "\n\nTSV для правки:\n" + result.savedTsvPath;
@@ -884,6 +1212,51 @@
         win.layout.resize();
         win.onResizing = win.onResize = function () { this.layout.resize(); };
         return win;
+    }
+
+    function runAutoPreset(preset) {
+        var delimiterValues = ["auto", "\t", ",", ";"];
+        var delimiter = preset.delimiter;
+        if (typeof preset.delimiterIndex === "number") delimiter = delimiterValues[preset.delimiterIndex] || "auto";
+        var settings = {
+            sourceMode: preset.sourceMode || "file",
+            file: new File(preset.filePath || preset.file || ""),
+            url: preset.url || "",
+            delimiter: delimiter || "auto",
+            mainCompName: preset.mainCompName || DEFAULT_MAIN_COMP,
+            mainCompFolderPath: preset.mainCompFolderPath || "",
+            titleLayerName: preset.titleLayerName || DEFAULT_TITLE_LAYER,
+            descLayerName: preset.descLayerName || DEFAULT_DESC_LAYER,
+            titleColumnName: preset.titleColumnName || DEFAULT_TITLE_LAYER,
+            descColumnName: preset.descColumnName || DEFAULT_DESC_LAYER,
+            namePrefix: preset.namePrefix || "Session ",
+            addToRenderQueue: preset.addToRenderQueue === true,
+            addExistingToRenderQueue: preset.addExistingToRenderQueue === true,
+            outputModuleTemplate: preset.outputModuleTemplate || "",
+            outputToPreset: preset.outputToPreset || "",
+            outputToTemplate: preset.outputToTemplate || "",
+            programMode: preset.programMode === true,
+            saveExtractedTsv: preset.saveExtractedTsv === true,
+            routeByShiftDay: preset.routeByShiftDay === true,
+            topicsRootPath: preset.topicsRootPath || "!_COMPS/02_ЗАСТАВКА С ТЕМОЙ СЕССИИ",
+            shiftName: preset.shiftName || "",
+            autoConfirm: preset.autoConfirm === true,
+            planOnly: preset.planOnly === true
+        };
+        if (settings.sourceMode === "file" && trimString(preset.filePath || preset.file || "") === "") {
+            throw new Error("Выбери файл TSV/CSV/TXT.");
+        }
+        if (settings.sourceMode === "url" && trimString(settings.url) === "") {
+            throw new Error("Вставь URL Google Sheet CSV/TSV.");
+        }
+        return makeComps(settings);
+    }
+
+    var autoPreset = $.global.__sheet2compSessionTopicsPreset;
+    if (autoPreset && autoPreset.autoRun === true) {
+        $.global.__sheet2compSessionTopicsPreset = null;
+        $.global.__sheet2compSessionTopicsLastResult = runAutoPreset(autoPreset);
+        return;
     }
 
     var ui = buildUI(thisObj);

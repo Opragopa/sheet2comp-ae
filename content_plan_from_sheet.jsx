@@ -12,10 +12,20 @@
     var PYTHON_SCRIPT = new File(SCRIPT_FOLDER.fsName + "/extract_content_plan.py");
     var SESSION_SCRIPT = new File(SCRIPT_FOLDER.fsName + "/session_topics_from_sheet.jsx");
     var PERSON_SCRIPT = new File(SCRIPT_FOLDER.fsName + "/person_plates_from_sheet.jsx");
+    var RECORDING_SCRIPT = new File(SCRIPT_FOLDER.fsName + "/recording_plates_from_sheet.jsx");
     var PERSON_SETTINGS_FILE = new File(Folder.myDocuments.fsName + "/ae_person_plate_settings.json");
     var SETTINGS_FILE = new File(Folder.myDocuments.fsName + "/ae_content_plan_settings.json");
-    var DEFAULT_URL = "https://docs.google.com/spreadsheets/d/10C3eoaG146WgOeQeoli90dQCHPruoJ_d4_rqcyoUR8M/edit?gid=213088400#gid=213088400";
+    var DEFAULT_URL = "";
     var DEFAULT_OUTPUT_DIR = new Folder(Folder.myDocuments.fsName + "/ae_plaque_data/content_plan");
+    var PLATES_ROOT_PATH = "!_COMPS/!!!_ПЛАШКИ НА РЕНДЕР";
+    var TOPICS_ROOT_PATH = "!_COMPS/02_ЗАСТАВКА С ТЕМОЙ СЕССИИ";
+    var PLATES_MASTER_COMP = "MASTER-COMP";
+    var PLATES_OUTPUT_MODULE_TEMPLATE = "High Quality with Alpha";
+    var TOPICS_OUTPUT_MODULE_TEMPLATE = "DVX 3 no audio";
+    var DEFAULT_PLATES_OUTPUT_TEMPLATE = "/Volumes/Macintosh HD/Users/opragopa/Yandex.Disk.localized/Заставки ТС 2026/Трансляция/Динамика/04_ПЛАШКИ/[shift]/[dayTitle]/[compName].[fileExtension]";
+    var DEFAULT_TOPICS_OUTPUT_TEMPLATE = "/Volumes/Macintosh HD/Users/opragopa/Yandex.Disk.localized/Оперативная графика ТС 2026/ГРАФИКА/ТЕМЫ СЕССИЙ/[shift]/День [dayNumber]/[compName].[fileExtension]";
+    var DEFAULT_PLATES_OUTPUT_TO_PRESET = "";
+    var DEFAULT_TOPICS_OUTPUT_TO_PRESET = "";
 
     function trimText(value) {
         return String(value || "").replace(/^\s+|\s+$/g, "");
@@ -172,7 +182,7 @@
 
     function runPrepare(source, outputDir, day, statusText, silent) {
         var outputArg = normalizeFolderArg(outputDir);
-        if (trimText(source) === "") throw new Error("Вставь ссылку Google Sheet или выбери TSV.");
+        if (trimText(source) === "") throw new Error("Вставь ссылку на AE-ready Google Sheet или выбери папку с готовыми вкладками.");
         if (outputArg === "") throw new Error("Выбери папку для TSV.");
 
         var outputFolder = new Folder(outputArg);
@@ -322,7 +332,46 @@
         $.evalFile(SESSION_SCRIPT);
     }
 
-    function savePersonPreset(outputDir, graphicType) {
+    function sessionTemplateName(shiftName) {
+        return trimText(shiftName || "ЕДИНСТВО") + "_Заставка с темами_альт";
+    }
+
+    function shiftFolderPath(rootPath, shiftName) {
+        return rootPath + "/" + trimText(shiftName || "ЕДИНСТВО");
+    }
+
+    function runSessionTopicsAuto(outputDir, shiftName, outputToTemplate, outputToPreset, planOnly) {
+        var file = assertPrepared(outputDir, "content_plan_sessions.tsv");
+        if (!SESSION_SCRIPT.exists) throw new Error("Не найден скрипт:\n" + SESSION_SCRIPT.fsName);
+        $.global.__sheet2compSessionTopicsPreset = {
+            autoRun: true,
+            autoConfirm: planOnly === true ? false : true,
+            planOnly: planOnly === true,
+            sourceMode: "file",
+            filePath: fileArg(file),
+            delimiterIndex: 1,
+            programMode: false,
+            saveExtractedTsv: false,
+            mainCompName: sessionTemplateName(shiftName),
+            mainCompFolderPath: shiftFolderPath(TOPICS_ROOT_PATH, shiftName),
+            titleLayerName: "ТЕМА",
+            descLayerName: "ОПИСАНИЕ",
+            titleColumnName: "ТЕМА",
+            descColumnName: "ОПИСАНИЕ",
+            addToRenderQueue: true,
+            addExistingToRenderQueue: true,
+            outputModuleTemplate: TOPICS_OUTPUT_MODULE_TEMPLATE,
+            outputToPreset: outputToPreset,
+            outputToTemplate: outputToTemplate,
+            routeByShiftDay: true,
+            topicsRootPath: TOPICS_ROOT_PATH,
+            shiftName: shiftName
+        };
+        $.evalFile(SESSION_SCRIPT);
+        return $.global.__sheet2compSessionTopicsLastResult || null;
+    }
+
+    function savePersonPreset(outputDir, graphicType, autoMode, outputToTemplate, outputToPreset) {
         var fileName = graphicType === "Визитка" ? "content_plan_cards.tsv" : "content_plan_plates.tsv";
         var file = assertPrepared(outputDir, fileName);
         var current = readJsonFile(PERSON_SETTINGS_FILE) || {};
@@ -334,12 +383,22 @@
         current.photoField = "Фото на плашку";
         current.shiftField = "ДЕНЬ";
         current.shiftFilter = "";
+        current.shiftName = "";
+        current.dayField = "ДЕНЬ";
         current.graphicType = graphicType;
         current.compPrefix = graphicType;
+        current.templateCompName = autoMode === true ? PLATES_MASTER_COMP : current.templateCompName;
+        current.templateFolderPath = autoMode === true ? PLATES_ROOT_PATH : current.templateFolderPath;
+        current.routeByShiftDay = autoMode === true;
+        current.platesRootPath = PLATES_ROOT_PATH;
+        current.outputModuleTemplate = autoMode === true ? PLATES_OUTPUT_MODULE_TEMPLATE : current.outputModuleTemplate;
+        current.outputToPreset = autoMode === true ? outputToPreset : current.outputToPreset;
+        current.outputToTemplate = autoMode === true ? outputToTemplate : current.outputToTemplate;
         current.autoImportPhotos = false;
         current.requirePhotoPrecomp = graphicType === "Визитка";
         current.photoLayer = graphicType === "Визитка" ? "PHOTO" : (current.photoLayer || "Rectangle 3");
         current.photoLayerIndex = graphicType === "Визитка" ? "" : (current.photoLayerIndex || "6");
+        current.addToRenderQueue = autoMode === true ? true : current.addToRenderQueue;
         writeJsonFile(PERSON_SETTINGS_FILE, current);
     }
 
@@ -351,8 +410,217 @@
                 throw new Error("Визитки пустые.\n\nВ строгих площадках B/C/D не найдено событий, требующих визитки, или нет фото-данных. Проверь import_report.json и при необходимости заполни фото/создай черновики вручную.");
             }
         }
-        savePersonPreset(outputDir, graphicType);
+        savePersonPreset(outputDir, graphicType, false, "", "");
         $.evalFile(PERSON_SCRIPT);
+    }
+
+    function runPersonPlatesAuto(outputDir, shiftName, outputToTemplate, outputToPreset, previewOnly) {
+        if (!PERSON_SCRIPT.exists) throw new Error("Не найден скрипт:\n" + PERSON_SCRIPT.fsName);
+        savePersonPreset(outputDir, "Плашка", true, outputToTemplate, outputToPreset);
+        $.global.__sheet2compPersonPlatesPreset = {
+            autoRun: true,
+            silent: true,
+            sheetUrl: fileArg(assertPrepared(outputDir, "content_plan_plates.tsv")),
+            sheetGid: "0",
+            dataMode: "Таблица",
+            nameField: "ФИО спикера",
+            positionField: "Должность",
+            photoField: "Фото на плашку",
+            shiftField: "ДЕНЬ",
+            shiftFilter: "",
+            shiftName: shiftName,
+            dayField: "ДЕНЬ",
+            graphicType: "Плашка",
+            compPrefix: "Плашка",
+            templateCompName: PLATES_MASTER_COMP,
+            templateFolderPath: PLATES_ROOT_PATH,
+            routeByShiftDay: true,
+            platesRootPath: PLATES_ROOT_PATH,
+            outputModuleTemplate: PLATES_OUTPUT_MODULE_TEMPLATE,
+            outputToPreset: outputToPreset,
+            outputToTemplate: outputToTemplate,
+            queueLabelIndex: 9,
+            autoImportPhotos: false,
+            requirePhotoPrecomp: false,
+            addToRenderQueue: true,
+            autoConfirm: previewOnly === true ? false : true,
+            previewOnly: previewOnly === true
+        };
+        $.evalFile(PERSON_SCRIPT);
+        return $.global.__sheet2compPersonPlatesLastResult || null;
+    }
+
+    function planSummaryText(topicResult, plateResult) {
+        var parts = [];
+        parts.push("План импорта\n");
+        parts.push("Темы:");
+        parts.push("создать " + (topicResult ? (topicResult.plannedCreates || 0) : 0) + ", обновить " + (topicResult ? (topicResult.plannedUpdates || 0) : 0) + ", без изменений " + (topicResult ? topicResult.skipped.length : 0) + ", конфликты " + (topicResult ? topicResult.conflicts.length : 0));
+        parts.push("");
+        parts.push("Плашки:");
+        parts.push("создать " + (plateResult ? plateResult.created : 0) + ", оставить " + (plateResult ? plateResult.skippedExisting : 0) + ", пересоздать " + (plateResult ? plateResult.recreated : 0) + ", конфликты " + (plateResult ? plateResult.conflicts : 0));
+        if (topicResult && topicResult.preview && topicResult.preview.length) {
+            parts.push("");
+            parts.push("Первые действия по темам:");
+            parts.push(topicResult.preview.join("\n\n"));
+        }
+        if (plateResult && plateResult.preview && plateResult.preview.length) {
+            parts.push("");
+            parts.push("Первые действия по плашкам:");
+            parts.push(plateResult.preview.join("\n\n"));
+        }
+        return parts.join("\n");
+    }
+
+    function startRenderQueueIfNeeded(enabled) {
+        if (enabled !== true) return false;
+        if (!app.project || !app.project.renderQueue || app.project.renderQueue.numItems < 1) {
+            throw new Error("Render Queue пустой.");
+        }
+        app.project.renderQueue.render();
+        return true;
+    }
+
+    function cleanProjectName(value) {
+        var text = trimText(value);
+        text = text.replace(/[\\\/:\*\?"<>\|#%\{\}\[\]]/g, "-");
+        text = text.replace(/\s+/g, " ");
+        return trimText(text);
+    }
+
+    function dayNumber(value) {
+        var match = trimText(value).match(/(?:день\s*)?0*(\d+)/i);
+        if (!match) return "";
+        var num = parseInt(match[1], 10);
+        return isNaN(num) ? "" : String(num);
+    }
+
+    function dayNumber2(value) {
+        var number = dayNumber(value);
+        if (number === "") return "";
+        var num = parseInt(number, 10);
+        return num < 10 ? "0" + num : String(num);
+    }
+
+    function formatDayFolderName(value) {
+        var number = dayNumber2(value);
+        return number !== "" ? "день " + number : cleanProjectName(value);
+    }
+
+    function outputDayTitle(value) {
+        var number = dayNumber2(value);
+        return number !== "" ? "День " + number : cleanProjectName(value);
+    }
+
+    function extensionFromName(name) {
+        var text = String(name || "");
+        try {
+            text = File.decode(text);
+        } catch (e) {}
+        var match = text.match(/(\.[^\.\/\\]+)$/);
+        return match ? match[1] : "";
+    }
+
+    function outputExtension(outputModule, templateName) {
+        var ext = outputModule && outputModule.file ? extensionFromName(outputModule.file.name) : "";
+        if (ext.indexOf("[") !== -1 || ext.indexOf("]") !== -1 || ext.indexOf("?") !== -1) ext = "";
+        if (ext === "" && trimText(templateName).toLowerCase().indexOf("dvx") !== -1) return ".mov";
+        return ext || ".mov";
+    }
+
+    function replaceAllText(text, token, value) {
+        return String(text || "").split(token).join(String(value || ""));
+    }
+
+    function renderTemplatePath(templateText, comp, context, extension) {
+        var ext = extension || ".mov";
+        var extNoDot = ext.charAt(0) === "." ? ext.substring(1) : ext;
+        var path = String(templateText || "");
+        path = replaceAllText(path, "[compName]", trimText(comp && comp.name ? comp.name : "render"));
+        path = replaceAllText(path, "[fileExtension]", extNoDot);
+        path = replaceAllText(path, "[shift]", cleanProjectName(context.shift));
+        path = replaceAllText(path, "[day]", formatDayFolderName(context.day));
+        path = replaceAllText(path, "[dayTitle]", outputDayTitle(context.day));
+        path = replaceAllText(path, "[dayNumber]", dayNumber(context.day));
+        path = replaceAllText(path, "[dayNumber2]", dayNumber2(context.day));
+        return path;
+    }
+
+    function ensureDiskFolderTree(folder) {
+        if (!folder || folder.exists) return;
+        var parent = folder.parent;
+        if (parent && !parent.exists) ensureDiskFolderTree(parent);
+        folder.create();
+    }
+
+    function encodedPathSegment(value) {
+        var text = String(value || "");
+        if (typeof File !== "undefined" && typeof File.encode === "function") return File.encode(text);
+        return encodeURIComponent(text);
+    }
+
+    function pathToAbsoluteUri(pathText) {
+        var text = String(pathText || "").replace(/\\/g, "/");
+        if (/^file:\/\//i.test(text)) return text;
+        var prefix = "";
+        if (text.indexOf("/") === 0) {
+            prefix = "file://";
+            text = text.substring(1);
+        }
+        var parts = text.split("/");
+        for (var i = 0; i < parts.length; i++) {
+            parts[i] = encodedPathSegment(parts[i]);
+        }
+        return prefix + "/" + parts.join("/");
+    }
+
+    function fileFromUnicodePath(fullPath) {
+        var uri = pathToAbsoluteUri(fullPath);
+        var splitIndex = uri.lastIndexOf("/");
+        if (splitIndex < 0) return new File(uri);
+        var folderUri = uri.substring(0, splitIndex);
+        var fileNameUri = uri.substring(splitIndex + 1);
+        var folder = new Folder(folderUri);
+        ensureDiskFolderTree(folder);
+        return new File(folderUri + "/" + fileNameUri);
+    }
+
+    function applyOutputModuleTemplate(outputModule, templateName) {
+        var name = trimText(templateName);
+        if (name === "") return;
+        try {
+            outputModule.applyTemplate(name);
+        } catch (templateError) {
+            throw new Error("Не найден или не применился Output Module шаблон \"" + name + "\".");
+        }
+    }
+
+    function applyOutputToPreset(outputModule, presetName) {
+        var name = trimText(presetName);
+        if (name === "") return false;
+        try {
+            outputModule.applyTemplate(name);
+            return true;
+        } catch (presetError) {
+            throw new Error("Не найден или не применился Output To preset \"" + name + "\".");
+        }
+    }
+
+    function applyPendingOutputTo() {
+        var pending = $.global.__sheet2compPendingOutputTo || [];
+        var changed = 0;
+        for (var i = 0; i < pending.length; i++) {
+            var entry = pending[i];
+            var item = entry.item;
+            if (!item) continue;
+            for (var j = 1; j <= item.numOutputModules; j++) {
+                var outputModule = item.outputModule(j);
+                applyOutputModuleTemplate(outputModule, entry.outputModuleTemplate);
+            }
+            changed++;
+        }
+        $.global.__sheet2compPendingOutputTo = [];
+        $.global.__sheet2compDeferOutputTo = false;
+        return changed;
     }
 
     function addLabeledEdit(parent, label, value, chars) {
@@ -385,6 +653,12 @@
             source: DEFAULT_URL,
             outputDir: DEFAULT_OUTPUT_DIR.absoluteURI || DEFAULT_OUTPUT_DIR.fsName,
             day: "",
+            shiftName: "ЕДИНСТВО",
+            platesOutputToTemplate: DEFAULT_PLATES_OUTPUT_TEMPLATE,
+            topicsOutputToTemplate: DEFAULT_TOPICS_OUTPUT_TEMPLATE,
+            platesOutputToPreset: DEFAULT_PLATES_OUTPUT_TO_PRESET,
+            topicsOutputToPreset: DEFAULT_TOPICS_OUTPUT_TO_PRESET,
+            autoStartRender: false,
             lastStatus: ""
         };
     }
@@ -396,6 +670,8 @@
             if (!saved.hasOwnProperty(key) || trimText(saved[key]) === "") saved[key] = defaults[key];
         }
         if (hasBrokenPath(saved.outputDir)) saved.outputDir = defaults.outputDir;
+        if (hasBrokenPath(saved.platesOutputToTemplate)) saved.platesOutputToTemplate = defaults.platesOutputToTemplate;
+        if (hasBrokenPath(saved.topicsOutputToTemplate)) saved.topicsOutputToTemplate = defaults.topicsOutputToTemplate;
         return saved;
     }
 
@@ -403,27 +679,47 @@
         writeJsonFile(SETTINGS_FILE, settings);
     }
 
-    function buildUI() {
+    function buildUI(thisObj) {
         var settings = loadSettings();
-        var win = new Window("palette", "Контент-план: подготовка и импорт", undefined, { resizeable: true });
+        var win = thisObj instanceof Panel
+            ? thisObj
+            : new Window("palette", "Контент-план: подготовка и импорт", undefined, { resizeable: true });
         win.orientation = "column";
         win.alignChildren = ["fill", "top"];
         win.margins = 12;
+
+        var intro = win.add("statictext", undefined, "Порядок работы: подготовь TSV, посмотри план импорта, затем запускай обновление.");
+        intro.characters = 82;
 
         var sourcePanel = win.add("panel", undefined, "Источник");
         sourcePanel.orientation = "column";
         sourcePanel.alignChildren = ["fill", "top"];
         sourcePanel.margins = 10;
 
-        var sourceInput = addLabeledEdit(sourcePanel, "Google Sheet / TSV", settings.source, 58);
+        var sourceInput = addLabeledEdit(sourcePanel, "AE-ready Sheet / папка", settings.source, 58);
+        sourceInput.helpTip = "Сюда нужна ссылка на нормализованную AE-ready таблицу из бота или папка с файлами content_plan_*.tsv.";
         var outputInput = addFolderEdit(sourcePanel, "Папка TSV", settings.outputDir, 58);
         var dayInput = addLabeledEdit(sourcePanel, "День / дата", settings.day, 20);
         dayInput.helpTip = "Например: ДЕНЬ 3 или 22.07. Если пусто, выгрузятся все дни.";
+        var shiftInput = addLabeledEdit(sourcePanel, "Смена", settings.shiftName, 20);
+        shiftInput.helpTip = "Например: ЕДИНСТВО, РОДИНА или ПРАВДА. Используется для папок и шаблона темы.";
+        var platesOutputInput = addLabeledEdit(sourcePanel, "Output To плашек", settings.platesOutputToTemplate, 58);
+        platesOutputInput.helpTip = "Сейчас не применяется автоматически. Output To выставляется вручную в Render Queue.";
+        var platesOutputPresetInput = addLabeledEdit(sourcePanel, "Preset плашек", settings.platesOutputToPreset, 32);
+        platesOutputPresetInput.helpTip = "Сейчас не применяется автоматически. Output To preset выбирается вручную в Render Queue.";
+        var topicsOutputInput = addLabeledEdit(sourcePanel, "Output To тем", settings.topicsOutputToTemplate, 58);
+        topicsOutputInput.helpTip = "Сейчас не применяется автоматически. Output To выставляется вручную в Render Queue.";
+        var topicsOutputPresetInput = addLabeledEdit(sourcePanel, "Preset тем", settings.topicsOutputToPreset, 32);
+        topicsOutputPresetInput.helpTip = "Сейчас не применяется автоматически. Output To preset выбирается вручную в Render Queue.";
+        var renderCheck = sourcePanel.add("checkbox", undefined, "Сразу запустить Render Queue после обновления");
+        renderCheck.value = settings.autoStartRender === true;
 
         var prepareGroup = win.add("group");
         prepareGroup.orientation = "row";
+        var saveButton = prepareGroup.add("button", undefined, "Запомнить");
         var prepareButton = prepareGroup.add("button", undefined, "Подготовить TSV");
-        var checkChangesButton = prepareGroup.add("button", undefined, "Проверить изменения");
+        var checkChangesButton = prepareGroup.add("button", undefined, "Проверить TSV");
+        var importPlanButton = prepareGroup.add("button", undefined, "План импорта");
         var statusText = prepareGroup.add("statictext", undefined, settings.lastStatus || "TSV еще не готовились");
         statusText.characters = 48;
 
@@ -431,18 +727,36 @@
         openPanel.orientation = "row";
         openPanel.alignChildren = ["left", "center"];
         openPanel.margins = 10;
+        var autoButton = openPanel.add("button", undefined, "Обновить информацию");
         var topicsButton = openPanel.add("button", undefined, "Темы сессий");
         var platesButton = openPanel.add("button", undefined, "Плашки");
         var cardsButton = openPanel.add("button", undefined, "Визитки");
+        var recordingButton = openPanel.add("button", undefined, "Запись");
 
         function collectSettings(status) {
             return {
                 source: sourceInput.text,
                 outputDir: outputInput.text,
                 day: dayInput.text,
+                shiftName: shiftInput.text,
+                platesOutputToTemplate: platesOutputInput.text,
+                topicsOutputToTemplate: topicsOutputInput.text,
+                platesOutputToPreset: platesOutputPresetInput.text,
+                topicsOutputToPreset: topicsOutputPresetInput.text,
+                autoStartRender: renderCheck.value,
                 lastStatus: status || statusText.text
             };
         }
+
+        saveButton.onClick = function () {
+            try {
+                saveSettings(collectSettings("Настройки сохранены"));
+                statusText.text = "Настройки сохранены";
+                alert("Настройки сохранены.", SCRIPT_NAME);
+            } catch (err) {
+                alert(SCRIPT_NAME + "\n\n" + (err.message || err.toString()));
+            }
+        };
 
         prepareButton.onClick = function () {
             try {
@@ -463,6 +777,71 @@
                 saveSettings(collectSettings(statusText.text));
             } catch (err) {
                 statusText.text = "Ошибка проверки изменений";
+                saveSettings(collectSettings(statusText.text));
+                alert(SCRIPT_NAME + "\n\n" + (err.message || err.toString()));
+            }
+        };
+
+        autoButton.onClick = function () {
+            try {
+                var collected = collectSettings("Обновляю информацию...");
+                saveSettings(collected);
+                statusText.text = "Готовлю TSV...";
+                runPrepare(sourceInput.text, outputInput.text, dayInput.text, statusText, true);
+                statusText.text = "Собираю план...";
+                var topicPlan = runSessionTopicsAuto(outputInput.text, shiftInput.text, topicsOutputInput.text, topicsOutputPresetInput.text, true);
+                var platePlan = runPersonPlatesAuto(outputInput.text, shiftInput.text, platesOutputInput.text, platesOutputPresetInput.text, true);
+                if (!confirm(planSummaryText(topicPlan, platePlan) + "\n\nПрименить эти изменения?")) {
+                    statusText.text = "Импорт отменен";
+                    saveSettings(collectSettings(statusText.text));
+                    return;
+                }
+                $.global.__sheet2compPendingOutputTo = [];
+                $.global.__sheet2compDeferOutputTo = true;
+                statusText.text = "Создаю темы...";
+                var topicResult = runSessionTopicsAuto(outputInput.text, shiftInput.text, topicsOutputInput.text, topicsOutputPresetInput.text, false);
+                statusText.text = "Создаю плашки...";
+                var plateResult = runPersonPlatesAuto(outputInput.text, shiftInput.text, platesOutputInput.text, platesOutputPresetInput.text, false);
+                statusText.text = "Настраиваю Output Module...";
+                var outputModuleChanged = applyPendingOutputTo();
+                var renderStarted = startRenderQueueIfNeeded(renderCheck.value);
+                statusText.text = renderStarted ? "Рендер запущен" : "Готово, очередь подготовлена";
+                saveSettings(collectSettings(statusText.text));
+
+                alert(
+                    "Обновление готово.\n\n" +
+                    "Темы: создано " + (topicResult ? topicResult.created.length : 0) +
+                    ", обновлено " + (topicResult ? topicResult.updated.length : 0) +
+                    ", без изменений " + (topicResult ? topicResult.skipped.length : 0) +
+                    ", в очередь " + (topicResult ? topicResult.created.length + (topicResult.queued ? topicResult.queued.length : 0) : 0) +
+                    ", дублей удалено " + (topicResult ? (topicResult.duplicatesRemoved || 0) : 0) + "\n" +
+                    "Плашки: создано " + (plateResult ? plateResult.created : 0) +
+                    ", уже были " + (plateResult ? plateResult.skippedExisting : 0) +
+                    ", пропущено " + (plateResult ? plateResult.skipped : 0) +
+                    ", дублей удалено " + (plateResult ? (plateResult.duplicatesRemoved || 0) : 0) + "\n" +
+                    "Output Module применен: " + outputModuleChanged + "\n" +
+                    "Render Queue: " + (renderStarted ? "запущен" : "подготовлен") + "\n\n" +
+                    "Смена: " + shiftInput.text
+                );
+            } catch (err) {
+                $.global.__sheet2compDeferOutputTo = false;
+                statusText.text = "Ошибка автообновления";
+                saveSettings(collectSettings(statusText.text));
+                alert(SCRIPT_NAME + "\n\n" + (err.message || err.toString()));
+            }
+        };
+
+        importPlanButton.onClick = function () {
+            try {
+                saveSettings(collectSettings("Собираю план импорта..."));
+                runPrepare(sourceInput.text, outputInput.text, dayInput.text, statusText, true);
+                var topicPlan = runSessionTopicsAuto(outputInput.text, shiftInput.text, topicsOutputInput.text, topicsOutputPresetInput.text, true);
+                var platePlan = runPersonPlatesAuto(outputInput.text, shiftInput.text, platesOutputInput.text, platesOutputPresetInput.text, true);
+                statusText.text = "План импорта готов";
+                saveSettings(collectSettings(statusText.text));
+                alert(planSummaryText(topicPlan, platePlan), SCRIPT_NAME);
+            } catch (err) {
+                statusText.text = "Ошибка плана импорта";
                 saveSettings(collectSettings(statusText.text));
                 alert(SCRIPT_NAME + "\n\n" + (err.message || err.toString()));
             }
@@ -495,13 +874,25 @@
             }
         };
 
+        recordingButton.onClick = function () {
+            try {
+                saveSettings(collectSettings());
+                if (!RECORDING_SCRIPT.exists) throw new Error("Не найден скрипт:\n" + RECORDING_SCRIPT.fsName);
+                $.evalFile(RECORDING_SCRIPT);
+            } catch (err) {
+                alert(SCRIPT_NAME + "\n\n" + (err.message || err.toString()));
+            }
+        };
+
         win.layout.layout(true);
         win.layout.resize();
         win.onResizing = win.onResize = function () { this.layout.resize(); };
         return win;
     }
 
-    var ui = buildUI();
-    ui.center();
-    ui.show();
+    var ui = buildUI(thisObj);
+    if (ui instanceof Window) {
+        ui.center();
+        ui.show();
+    }
 })(this);

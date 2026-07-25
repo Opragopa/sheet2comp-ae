@@ -8,10 +8,15 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+import content_quality as quality
+
 
 DEFAULT_TOPIC_HEADER = "ТЕМА"
 DEFAULT_DESCRIPTION_HEADER = "ОПИСАНИЕ"
 DEFAULT_COMP_NAME_HEADER = "ИМЯ_КОМПОЗИЦИИ"
+PERSON_START_RE = re.compile(
+    r"(?=(?:^|\s)((?:[А-ЯЁA-Z]\.\s*){1,3}[А-ЯЁ][а-яё-]+|[А-ЯЁ][а-яё-]+\s+[А-ЯЁ][а-яё-]+(?:\s+[А-ЯЁ][а-яё-]+)?(?=\s*,)))"
+)
 PROGRAM_FIRST_COLUMN_INDEX = 1
 PROGRAM_LAST_COLUMN_INDEX = 3
 DEFAULT_VENUE_NAMES = {
@@ -45,7 +50,7 @@ def read_source(source):
             return response.read().decode("utf-8-sig"), url
 
     path = Path(source)
-    return path.read_text(encoding="utf-8-sig"), str(path)
+    return path.read_bytes().decode("utf-8-sig"), str(path)
 
 
 def guess_delimiter(text):
@@ -59,6 +64,8 @@ def guess_delimiter(text):
 
 
 def read_rows(text, delimiter):
+    text = str(text or "").replace("\r\n", "\n")
+    text = re.sub(r"\r *", " ", text)
     reader = csv.reader(io.StringIO(text), delimiter=delimiter)
     return [row for row in reader]
 
@@ -114,21 +121,29 @@ def venue_names_from_rows(rows):
 
 def session_comp_name(venue_name, topic):
     clean_topic_value = clean_topic(topic)
-    if not clean_topic_value:
-        return ""
-    clean_venue = clean_venue_header(venue_name)
-    return "{}/{}".format(clean_venue, clean_topic_value) if clean_venue else clean_topic_value
+    return clean_topic_value if clean_topic_value else ""
 
 
 def clean_topic(value):
-    text = clean_text(value)
-    text = re.sub(r"^[«\"'“”„]+", "", text)
-    text = re.sub(r"[»\"'“”„\]]+$", "", text)
-    return text.strip()
+    return quality.clean_topic(value)
+
+
+def person_start_matches(value):
+    matches = []
+    last_end = -1
+    for match in PERSON_START_RE.finditer(inline_text(value)):
+        if match.start(1) < last_end:
+            continue
+        candidate, _reason = quality.validate_person_name(match.group(1))
+        if not candidate:
+            continue
+        matches.append(match)
+        last_end = match.end(1)
+    return matches
 
 
 def first_expert_marker(text):
-    marker = re.search(r"(?is)(?:^|\s)(Эксперты?)\s*:", text)
+    marker = re.search(r"(?is)(?:^|\s)(?:Эксперты?|Эксперт|Гости|Спикеры?|Модератор|Ведущий)\s*:", text)
     return marker.start() if marker else None
 
 
@@ -175,11 +190,16 @@ def extract_session(cell):
         description = extract_event_description(text[: topic_match.start()])
     else:
         marker_index = first_expert_marker(text)
+        topic_source = text
         if marker_index is None:
-            return None
+            topic_source = inline_text(text)
+            starts = person_start_matches(topic_source)
+            if len(starts) < 2:
+                return None
+            marker_index = starts[0].start(1)
 
-        topic = clean_fallback_topic(text[:marker_index])
-        description = extract_event_description(text[:marker_index])
+        topic = clean_fallback_topic(topic_source[:marker_index])
+        description = extract_event_description(topic_source[:marker_index])
 
     if not topic:
         return None

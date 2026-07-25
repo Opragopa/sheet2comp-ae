@@ -15,8 +15,9 @@ PREPARE_PERSON_PY="prepare_person_plate_photos.py"
 EXTRACT_PY="extract_session_topics.py"
 CONTENT_PLAN_PY="extract_content_plan.py"
 RECORDING_PY="extract_recording_plan.py"
+QUALITY_PY="content_quality.py"
 
-if [[ ! -f "$SCRIPT_DIR/$JSX" || ! -f "$SCRIPT_DIR/$PERSON_JSX" || ! -f "$SCRIPT_DIR/$TOPICS_JSX" || ! -f "$SCRIPT_DIR/$SHORTEN_JSX" || ! -f "$SCRIPT_DIR/$CONTENT_PLAN_JSX" || ! -f "$SCRIPT_DIR/$RECORDING_JSX" || ! -f "$SCRIPT_DIR/$TOPICS_EXAMPLE" || ! -f "$SCRIPT_DIR/$PY" || ! -f "$SCRIPT_DIR/$PERSON_PY" || ! -f "$SCRIPT_DIR/$PREPARE_PERSON_PY" || ! -f "$SCRIPT_DIR/$EXTRACT_PY" || ! -f "$SCRIPT_DIR/$CONTENT_PLAN_PY" || ! -f "$SCRIPT_DIR/$RECORDING_PY" ]]; then
+if [[ ! -f "$SCRIPT_DIR/$JSX" || ! -f "$SCRIPT_DIR/$PERSON_JSX" || ! -f "$SCRIPT_DIR/$TOPICS_JSX" || ! -f "$SCRIPT_DIR/$SHORTEN_JSX" || ! -f "$SCRIPT_DIR/$CONTENT_PLAN_JSX" || ! -f "$SCRIPT_DIR/$RECORDING_JSX" || ! -f "$SCRIPT_DIR/$TOPICS_EXAMPLE" || ! -f "$SCRIPT_DIR/$PY" || ! -f "$SCRIPT_DIR/$PERSON_PY" || ! -f "$SCRIPT_DIR/$PREPARE_PERSON_PY" || ! -f "$SCRIPT_DIR/$EXTRACT_PY" || ! -f "$SCRIPT_DIR/$CONTENT_PLAN_PY" || ! -f "$SCRIPT_DIR/$RECORDING_PY" || ! -f "$SCRIPT_DIR/$QUALITY_PY" ]]; then
   echo "Missing one or more script files."
   exit 1
 fi
@@ -40,6 +41,8 @@ if [[ "$AE_SCRIPTS" == "" ]]; then
   exit 1
 fi
 
+AE_SCRIPTUI_PANELS="$(dirname "$AE_SCRIPTS")/ScriptUI Panels"
+
 PYTHON_CMD="$(command -v python3 || true)"
 if [[ "$PYTHON_CMD" == "" ]]; then
   echo "Python 3 not found. Install Python 3 and rerun."
@@ -47,12 +50,16 @@ if [[ "$PYTHON_CMD" == "" ]]; then
 fi
 
 mkdir -p "$AE_SCRIPTS"
+mkdir -p "$AE_SCRIPTUI_PANELS"
 cp "$SCRIPT_DIR/$JSX" "$AE_SCRIPTS/$JSX"
 cp "$SCRIPT_DIR/$PERSON_JSX" "$AE_SCRIPTS/$PERSON_JSX"
 cp "$SCRIPT_DIR/$TOPICS_JSX" "$AE_SCRIPTS/$TOPICS_JSX"
 cp "$SCRIPT_DIR/$SHORTEN_JSX" "$AE_SCRIPTS/$SHORTEN_JSX"
 cp "$SCRIPT_DIR/$CONTENT_PLAN_JSX" "$AE_SCRIPTS/$CONTENT_PLAN_JSX"
 cp "$SCRIPT_DIR/$RECORDING_JSX" "$AE_SCRIPTS/$RECORDING_JSX"
+cp "$SCRIPT_DIR/$PERSON_JSX" "$AE_SCRIPTUI_PANELS/$PERSON_JSX"
+cp "$SCRIPT_DIR/$TOPICS_JSX" "$AE_SCRIPTUI_PANELS/$TOPICS_JSX"
+cp "$SCRIPT_DIR/$CONTENT_PLAN_JSX" "$AE_SCRIPTUI_PANELS/$CONTENT_PLAN_JSX"
 cp "$SCRIPT_DIR/$TOPICS_EXAMPLE" "$AE_SCRIPTS/$TOPICS_EXAMPLE"
 cp "$SCRIPT_DIR/$PY" "$AE_SCRIPTS/$PY"
 cp "$SCRIPT_DIR/$PERSON_PY" "$AE_SCRIPTS/$PERSON_PY"
@@ -60,6 +67,7 @@ cp "$SCRIPT_DIR/$PREPARE_PERSON_PY" "$AE_SCRIPTS/$PREPARE_PERSON_PY"
 cp "$SCRIPT_DIR/$EXTRACT_PY" "$AE_SCRIPTS/$EXTRACT_PY"
 cp "$SCRIPT_DIR/$CONTENT_PLAN_PY" "$AE_SCRIPTS/$CONTENT_PLAN_PY"
 cp "$SCRIPT_DIR/$RECORDING_PY" "$AE_SCRIPTS/$RECORDING_PY"
+cp "$SCRIPT_DIR/$QUALITY_PY" "$AE_SCRIPTS/$QUALITY_PY"
 
 python3 - "$AE_SCRIPTS/ae_parser_config.json" "$PYTHON_CMD" <<'PY'
 import json
@@ -71,5 +79,7 @@ PY
 
 echo "Installed to:"
 echo "$AE_SCRIPTS"
+echo "Panels:"
+echo "$AE_SCRIPTUI_PANELS"
 echo "Python:"
 echo "$PYTHON_CMD"
