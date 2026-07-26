@@ -2372,7 +2372,7 @@
         if (!masterComp) {
             throw new Error("Не найдена композиция-шаблон:\n" + settings.templateCompName);
         }
-        saveSettings(settings);
+        if (preset.persistSettings !== false) saveSettings(settings);
         settings.autoConfirm = preset.autoConfirm === true;
         settings.previewOnly = preset.previewOnly === true;
         return generatePlates(masterComp, settings, runtime);
