@@ -113,6 +113,7 @@
             photoField: "Фото на плашку",
             shiftField: "Смена",
             shiftFilter: "единство",
+            shiftName: "",
             templateCompName: "",
             nameLayer: "ИМЯ",
             nameLayerIndex: "3",
@@ -128,6 +129,15 @@
             autoImportPhotos: true,
             recreateExistingComps: false,
             targetFolderName: "",
+            targetFolderPath: "",
+            addExistingToRenderQueue: false,
+            routeByShiftDay: false,
+            platesRootPath: "!_COMPS/!!!_ПЛАШКИ НА РЕНДЕР",
+            dayField: "ДЕНЬ",
+            outputModuleTemplate: "",
+            outputToPreset: "",
+            outputToTemplate: "",
+            queueLabelIndex: 0,
             compPrefix: "Плашка",
             delimiter: "_",
             photoFolderPath: "",
@@ -628,15 +638,179 @@
     }
 
     function buildOutputCompName(settings, name, timePrefix) {
-        var prefix = cleanPlateText(settings.compPrefix) || "Визитка";
-        var delimiter = settings.delimiter || "_";
-        var cleanTime = cleanPlateText(timePrefix);
-        // Rows from the recording plan carry an explicit date-and-time prefix.
-        // It is a data contract, so it must win over any UI prefix/type setting.
-        if (cleanTime !== "") {
-            return cleanTime + delimiter + cleanCompPersonNameText(name);
+        return cleanCompPersonNameText(name);
+    }
+
+    function cleanProjectName(value) {
+        var text = cleanPlateText(value);
+        text = text.replace(/[\\\/:\*\?"<>\|#%\{\}\[\]]/g, "-");
+        return cleanPlateText(text);
+    }
+
+    function formatDayFolderName(value) {
+        var text = cleanPlateText(value);
+        if (text === "") return "";
+        var match = text.match(/(?:день\s*)?0*(\d+)/i);
+        if (match) {
+            var num = parseInt(match[1], 10);
+            if (!isNaN(num)) return "день " + (num < 10 ? "0" : "") + num;
         }
-        return prefix + delimiter + cleanCompPersonNameText(name);
+        return cleanProjectName(text);
+    }
+
+    function dayNumber2(value) {
+        var text = cleanPlateText(value);
+        var match = text.match(/(?:день\s*)?0*(\d+)/i);
+        if (!match) return "";
+        var num = parseInt(match[1], 10);
+        if (isNaN(num)) return "";
+        return num < 10 ? "0" + num : String(num);
+    }
+
+    function dayNumber(value) {
+        var text = cleanPlateText(value);
+        var match = text.match(/(?:день\s*)?0*(\d+)/i);
+        if (!match) return "";
+        var num = parseInt(match[1], 10);
+        return isNaN(num) ? "" : String(num);
+    }
+
+    function outputDayTitle(value) {
+        var number = dayNumber2(value);
+        return number !== "" ? "День " + number : cleanProjectName(value);
+    }
+
+    function extensionFromName(name) {
+        var text = String(name || "");
+        try {
+            text = File.decode(text);
+        } catch (e) {}
+        var match = text.match(/(\.[^\.\/\\]+)$/);
+        return match ? match[1] : "";
+    }
+
+    function outputExtension(outputModule, settings) {
+        var ext = outputModule && outputModule.file ? extensionFromName(outputModule.file.name) : "";
+        if (ext.indexOf("[") !== -1 || ext.indexOf("]") !== -1 || ext.indexOf("?") !== -1) ext = "";
+        if (ext === "" && settings && cleanPlateText(settings.outputModuleTemplate).toLowerCase().indexOf("dvx") !== -1) return ".mov";
+        return ext || ".mov";
+    }
+
+    function outputCompNameToken(value) {
+        return cleanPlateText(value) || "render";
+    }
+
+    function replaceAllText(text, token, value) {
+        return String(text || "").split(token).join(String(value || ""));
+    }
+
+    function renderTemplatePath(templateText, comp, context, extension) {
+        var ext = extension || ".mov";
+        var extNoDot = ext.charAt(0) === "." ? ext.substring(1) : ext;
+        var path = String(templateText || "");
+        path = replaceAllText(path, "[compName]", outputCompNameToken(comp.name));
+        path = replaceAllText(path, "[fileExtension]", extNoDot);
+        path = replaceAllText(path, "[shift]", cleanProjectName(context.shift));
+        path = replaceAllText(path, "[day]", formatDayFolderName(context.day));
+        path = replaceAllText(path, "[dayTitle]", outputDayTitle(context.day));
+        path = replaceAllText(path, "[dayNumber]", dayNumber(context.day));
+        path = replaceAllText(path, "[dayNumber2]", dayNumber2(context.day));
+        return path;
+    }
+
+    function ensureDiskFolderTree(folder) {
+        if (!folder || folder.exists) return;
+        var parent = folder.parent;
+        if (parent && !parent.exists) ensureDiskFolderTree(parent);
+        folder.create();
+    }
+
+    function encodedPathSegment(value) {
+        var text = String(value || "");
+        if (typeof File !== "undefined" && typeof File.encode === "function") return File.encode(text);
+        return encodeURIComponent(text);
+    }
+
+    function pathToAbsoluteUri(pathText) {
+        var text = String(pathText || "").replace(/\\/g, "/");
+        if (/^file:\/\//i.test(text)) return text;
+        var prefix = "";
+        if (text.indexOf("/") === 0) {
+            prefix = "file://";
+            text = text.substring(1);
+        }
+        var parts = text.split("/");
+        for (var i = 0; i < parts.length; i++) {
+            parts[i] = encodedPathSegment(parts[i]);
+        }
+        return prefix + "/" + parts.join("/");
+    }
+
+    function fileFromUnicodePath(fullPath, extension) {
+        var ext = extension || ".mov";
+        var uri = pathToAbsoluteUri(fullPath);
+        var splitIndex = uri.lastIndexOf("/");
+        if (splitIndex < 0) return new File(uri);
+
+        var folderUri = uri.substring(0, splitIndex);
+        var fileNameUri = uri.substring(splitIndex + 1);
+        var folder = new Folder(folderUri);
+        ensureDiskFolderTree(folder);
+
+        return new File(folderUri + "/" + fileNameUri);
+    }
+
+    function outputFileFromTemplate(templateText, comp, context, outputModule, settings) {
+        var template = trimText(templateText);
+        if (template === "") return null;
+        var ext = outputExtension(outputModule, settings);
+        var fullPath = renderTemplatePath(template, comp, context, ext);
+        return fileFromUnicodePath(fullPath, ext);
+    }
+
+    function applyOutputModuleTemplate(outputModule, templateName) {
+        var name = trimText(templateName);
+        if (name === "") return;
+        try {
+            outputModule.applyTemplate(name);
+        } catch (templateError) {
+            throw new Error("Не найден или не применился Output Module шаблон \"" + name + "\".");
+        }
+    }
+
+    function registerDeferredOutputTo(item, comp, settings, context) {
+        if (!$.global.__sheet2compPendingOutputTo) $.global.__sheet2compPendingOutputTo = [];
+        $.global.__sheet2compPendingOutputTo.push({
+            item: item,
+            comp: comp,
+            outputModuleTemplate: settings.outputModuleTemplate,
+            queueLabelIndex: settings.queueLabelIndex,
+            context: {
+                shift: context.shift,
+                day: context.day
+            }
+        });
+    }
+
+    function applyQueueLabel(comp, item, labelIndex) {
+        var index = parseInt(labelIndex, 10);
+        if (isNaN(index) || index <= 0) return;
+        try { if (comp) comp.label = index; } catch (compLabelError) {}
+        try { if (item) item.label = index; } catch (itemLabelError) {}
+    }
+
+    function addCompToRenderQueue(comp, settings, context) {
+        var item = app.project.renderQueue.items.add(comp);
+        applyQueueLabel(comp, item, settings.queueLabelIndex);
+        if ($.global.__sheet2compDeferOutputTo === true) {
+            registerDeferredOutputTo(item, comp, settings, context);
+            return item;
+        }
+        for (var j = 1; j <= item.numOutputModules; j++) {
+            var outputModule = item.outputModule(j);
+            applyOutputModuleTemplate(outputModule, settings.outputModuleTemplate);
+        }
+        return item;
     }
 
     function uniqueNamePush(list, value) {
@@ -656,11 +830,15 @@
         }
         var compPersonName = cleanPlateText(getByColumn(row, "__nameLastFirst")) || compPersonNameText(rawName || name);
         var timePrefix = cleanPlateText(getByColumn(row, "__compTimePrefix"));
+        var shift = cleanPlateText(getByColumn(row, settings.actualShiftField || "Смена")) || cleanPlateText(settings.shiftName) || cleanPlateText(getByColumn(row, settings.shiftField));
+        var day = cleanPlateText(getByColumn(row, settings.dayField || "ДЕНЬ"));
         return {
             rawName: rawName,
             name: name,
             compPersonName: compPersonName,
             timePrefix: timePrefix,
+            shift: shift,
+            day: day,
             position: cleanPlateText(getByColumn(row, settings.positionField)),
             photoPath: cleanPlateText(getByColumn(row, "__photoLocalPath")),
             compName: buildOutputCompName(settings, compPersonName, timePrefix)
@@ -711,6 +889,11 @@
 
         var prefix = cleanPlateText(settings.compPrefix) || "Визитка";
         var delimiter = settings.delimiter || "_";
+        if (plateData.timePrefix !== "") {
+            uniqueNamePush(names, plateData.timePrefix + delimiter + cleanCompPersonNameText(plateData.compPersonName));
+            uniqueNamePush(names, plateData.timePrefix + delimiter + cleanCompPersonNameText(plateData.rawName));
+            uniqueNamePush(names, plateData.timePrefix + delimiter + cleanCompPersonNameText(plateData.name));
+        }
         if (plateData.rawName !== "") {
             uniqueNamePush(names, prefix + delimiter + safeCompText(plateData.rawName, delimiter));
             uniqueNamePush(names, prefix + delimiter + safeCompText(plateData.rawName.replace(/\s+/g, ""), delimiter));
@@ -834,6 +1017,22 @@
         return layer ? cleanPlateText(getTextLayerText(layer)) : "";
     }
 
+    function getCompRawTextValue(comp, layerName, layerIndexText) {
+        var layer = findTextLayer(comp, layerName, layerIndexText);
+        return layer ? trimText(getTextLayerText(layer)) : "";
+    }
+
+    function captureManualTextOverrides(comp, settings) {
+        if (!comp) return null;
+        var nameText = getCompRawTextValue(comp, settings.nameLayer, settings.nameLayerIndex);
+        var positionText = getCompRawTextValue(comp, settings.positionLayer, settings.positionLayerIndex);
+        if (nameText === "" && positionText === "") return null;
+        return {
+            name: nameText,
+            position: positionText
+        };
+    }
+
     function shouldRenameMatchedComp(match, plateData) {
         if (!match || !match.comp || match.comp.name === plateData.compName) return false;
         if (match.method === "name") return true;
@@ -904,9 +1103,48 @@
         return folder;
     }
 
+    function findOrCreateFolderPath(pathText) {
+        var text = cleanPlateText(pathText);
+        var folder = app.project.rootFolder;
+        if (text === "") return folder;
+
+        var parts = text.split(/[\/\\]+/);
+        for (var i = 0; i < parts.length; i++) {
+            var part = cleanProjectName(parts[i]);
+            if (part === "") continue;
+            folder = findOrCreateFolder(folder, part);
+        }
+        return folder;
+    }
+
     function targetFolderForMaster(masterComp, settings) {
+        if (cleanPlateText(settings.targetFolderPath) !== "") {
+            return findOrCreateFolderPath(settings.targetFolderPath);
+        }
         var parent = masterComp.parentFolder || app.project.rootFolder;
         return findOrCreateFolder(parent, settings.targetFolderName);
+    }
+
+    function targetFolderForPlate(masterComp, settings, plateData) {
+        if (settings.routeByShiftDay === true) {
+            var root = findOrCreateFolderPath(settings.platesRootPath || "!_COMPS/!!!_ПЛАШКИ НА РЕНДЕР");
+            var shiftFolder = findOrCreateFolder(root, cleanProjectName(plateData.shift) || "Без смены");
+            var dayFolder = findOrCreateFolder(shiftFolder, formatDayFolderName(plateData.day) || "без дня");
+            return dayFolder;
+        }
+        return targetFolderForMaster(masterComp, settings);
+    }
+
+    function findCompByNameInFolderPath(compName, folderPath) {
+        var folder = findOrCreateFolderPath(folderPath);
+        var wanted = cleanPlateText(compName);
+        for (var i = 1; i <= app.project.numItems; i++) {
+            var item = app.project.item(i);
+            if (item instanceof CompItem && cleanPlateText(item.name) === wanted && item.parentFolder === folder) {
+                return item;
+            }
+        }
+        return null;
     }
 
     function collectProjectComps() {
@@ -931,6 +1169,45 @@
                 items[i].remove();
             } catch (removeError) {}
         }
+    }
+
+    function folderAlreadyTracked(folders, folder) {
+        for (var i = 0; i < folders.length; i++) {
+            if (folders[i] === folder) return true;
+        }
+        return false;
+    }
+
+    function trackFolder(folders, folder) {
+        if (folder && !folderAlreadyTracked(folders, folder)) folders.push(folder);
+    }
+
+    function removeDuplicateCompsInFolders(folders, exceptComp) {
+        var removed = 0;
+        for (var f = 0; f < folders.length; f++) {
+            var folder = folders[f];
+            var keepByName = {};
+            var duplicates = [];
+            for (var i = 1; i <= app.project.numItems; i++) {
+                var item = app.project.item(i);
+                if (!(item instanceof CompItem) || item === exceptComp || item.parentFolder !== folder) continue;
+                var key = normalizeMetaPart(item.name);
+                if (key === "") continue;
+                if (keepByName[key]) {
+                    duplicates.push(item);
+                } else {
+                    keepByName[key] = item;
+                }
+            }
+
+            for (var d = duplicates.length - 1; d >= 0; d--) {
+                try {
+                    duplicates[d].remove();
+                    removed++;
+                } catch (removeDuplicateError) {}
+            }
+        }
+        return removed;
     }
 
     function normalizeFilterText(value) {
@@ -1285,7 +1562,7 @@
         return edit;
     }
 
-    function showWindow() {
+    function showWindow(thisObj) {
         if (!app.project) {
             alert("Откройте проект After Effects.", SCRIPT_NAME);
             return;
@@ -1303,11 +1580,16 @@
             settings.templateCompName = activeComp.name;
         }
         var runtime = loadRuntimeConfig();
-        var win = new Window("palette", "Плашки и визитки: имя, должность, фото", undefined, { resizeable: true });
+        var win = thisObj instanceof Panel
+            ? thisObj
+            : new Window("palette", "Плашки и визитки: имя, должность, фото", undefined, { resizeable: true });
         win.orientation = "column";
         win.alignChildren = ["fill", "top"];
         win.margins = 10;
         win.spacing = 6;
+
+        var intro = win.add("statictext", undefined, "Порядок работы: 1) проверь данные, 2) посмотри план, 3) подтверди импорт.");
+        intro.characters = 78;
 
         var tabs = win.add("tabbedpanel");
         tabs.alignChildren = ["fill", "top"];
@@ -1417,12 +1699,9 @@
         ddlGraphicType.selection = settings.graphicType === "Визитка" ? 1 : 0;
         ddlGraphicType.preferredSize.width = 180;
 
-        var initialCompPrefix = settings.graphicType === "Визитка" && settings.compPrefix === "Плашка" ? "Визитка" : settings.compPrefix;
         var initialPhotoLayer = settings.graphicType === "Визитка" && settings.photoLayer === "Rectangle 3" ? "PHOTO" : settings.photoLayer;
         edtPhotoLayer.text = initialPhotoLayer;
 
-        var edtPrefix = addLabeledEdit(createTab, "Префикс композиций:", initialCompPrefix, 170, 180);
-        var edtDelimiter = addLabeledEdit(createTab, "Разделитель:", settings.delimiter, 170, 80);
         var edtTargetFolder = addLabeledEdit(createTab, "Папка композиций:", settings.targetFolderName || "", 170, 180);
         var chkFit = createTab.add("checkbox", undefined, "Заполнять фото по размеру плейсхолдера");
         chkFit.value = settings.fitPhotoToPlaceholder;
@@ -1450,7 +1729,6 @@
 
         ddlGraphicType.onChange = function() {
             if (ddlGraphicType.selection && ddlGraphicType.selection.text === "Визитка") {
-                if (trimText(edtPrefix.text) === "" || edtPrefix.text === "Плашка") edtPrefix.text = "Визитка";
                 if (trimText(edtPhotoLayer.text) === "" || edtPhotoLayer.text === "Rectangle 3") edtPhotoLayer.text = "PHOTO";
             }
         };
@@ -1468,10 +1746,10 @@
         var buttons = win.add("group");
         buttons.orientation = "row";
         buttons.alignChildren = ["fill", "center"];
-        var btnSave = buttons.add("button", undefined, "Сохранить");
-        var btnCheck = buttons.add("button", undefined, "Проверить");
-        var btnNormalize = buttons.add("button", undefined, "Обновить");
-        var btnCreate = buttons.add("button", undefined, "Создать");
+        var btnSave = buttons.add("button", undefined, "Запомнить");
+        var btnCheck = buttons.add("button", undefined, "Проверить данные");
+        var btnNormalize = buttons.add("button", undefined, "План обновления");
+        var btnCreate = buttons.add("button", undefined, "Создать/обновить");
         btnSave.preferredSize.width = 120;
         btnCheck.preferredSize.width = 120;
         btnNormalize.preferredSize.width = 150;
@@ -1497,9 +1775,9 @@
             settings.graphicType = ddlGraphicType.selection ? ddlGraphicType.selection.text : "Плашка";
             settings.photoContentLayer = "";
             settings.photoContentLayerIndex = "";
-            settings.compPrefix = edtPrefix.text;
+            settings.compPrefix = settings.graphicType === "Визитка" ? "Визитка" : "Плашка";
             settings.photoCompPrefix = "PHOTO";
-            settings.delimiter = edtDelimiter.text;
+            settings.delimiter = "_";
             settings.targetFolderName = edtTargetFolder.text;
             settings.photoFolderPath = edtPhotoFolder.text;
             settings.autoImportPhotos = chkAutoImportPhotos.value;
@@ -1539,6 +1817,7 @@
                 return;
             }
             saveSettings(currentSettings);
+            currentSettings.autoConfirm = false;
             generatePlates(masterComp, currentSettings, runtime);
         };
 
@@ -1553,8 +1832,10 @@
             normalizeExistingPlates(masterComp, currentSettings, runtime);
         };
 
-        win.center();
-        win.show();
+        win.layout.layout(true);
+        win.layout.resize();
+        win.onResizing = win.onResize = function () { this.layout.resize(); };
+        return win;
     }
 
     function downloadData(settings, runtime) {
@@ -1771,83 +2052,207 @@
         }
     }
 
+    function planPlateGeneration(masterComp, settings, runtime) {
+        var templateWarnings = validateTemplate(masterComp, settings);
+        var result = downloadData(settings, runtime);
+        var rows = result.rows;
+        if (!rows || rows.length === 0) throw new Error("Данные пусты.");
+
+        var created = 0;
+        var skipped = 0;
+        var skippedExisting = 0;
+        var recreated = 0;
+        var linkedPlates = 0;
+        var skippedByShift = 0;
+        var conflicts = 0;
+        var preview = [];
+        var namesCreatedThisRun = {};
+        var baseCompByPerson = {};
+        var plannedBaseByPerson = {};
+        var plateRows = [];
+        var touchedFolders = [];
+        var planned = [];
+
+        for (var i = 0; i < rows.length; i++) {
+            var row = normalizeRow(rows[i]);
+            if (!rowMatchesShiftFilter(row, settings)) {
+                skippedByShift++;
+                continue;
+            }
+            var plateData = plateDataFromRow(row, settings);
+            plateData.rowIndex = i;
+            plateData.personKey = personAliasKey(plateData.compPersonName || plateData.name || plateData.rawName);
+            plateRows.push(plateData);
+        }
+
+        plateRows.sort(function(a, b) {
+            var at = timeSortKey(a.timePrefix);
+            var bt = timeSortKey(b.timePrefix);
+            if (at !== bt) return at - bt;
+            return a.rowIndex - b.rowIndex;
+        });
+
+        for (var p = 0; p < plateRows.length; p++) {
+            var plateData = plateRows[p];
+            if (plateData.name === "" || plateData.name.indexOf("#") === 0 || plateData.name.indexOf("#VALUE!") !== -1) {
+                skipped++;
+                continue;
+            }
+
+            var compName = plateData.compName;
+            var targetFolder = targetFolderForPlate(masterComp, settings, plateData);
+            trackFolder(touchedFolders, targetFolder);
+            var runCompKey = normalizeMetaPart(plateData.shift) + "|" + normalizeMetaPart(plateData.day) + "|" + compName;
+            if (namesCreatedThisRun[runCompKey] === true) {
+                conflicts++;
+                if (preview.length < 12) preview.push(compName + "\n  конфликт: повтор той же композиции в текущем импорте");
+                continue;
+            }
+            namesCreatedThisRun[runCompKey] = true;
+
+            var match = findPlateComp(settings, plateData, targetFolder, masterComp);
+            var exactMatches = findCompsByNameInFolder(compName, targetFolder, masterComp);
+            if (exactMatches.length > 1) {
+                conflicts++;
+                if (preview.length < 12) preview.push(compName + "\n  конфликт: в целевой папке уже несколько композиций с этим именем");
+                continue;
+            }
+            if (match && exactMatches.length === 1 && exactMatches[0] !== match.comp) {
+                conflicts++;
+                if (preview.length < 12) preview.push(compName + "\n  конфликт: meta и имя указывают на разные существующие композиции");
+                continue;
+            }
+
+            if (match && match.comp) {
+                if (!baseCompByPerson[plateData.personKey]) baseCompByPerson[plateData.personKey] = match.comp;
+                plannedBaseByPerson[plateData.personKey] = true;
+                if (settings.recreateExistingComps === true) {
+                    recreated++;
+                    planned.push({ action: "recreate", plateData: plateData, comp: match.comp, exactMatches: exactMatches, targetFolder: targetFolder });
+                    if (preview.length < 12) preview.push(compName + "\n  пересоздать существующую композицию");
+                } else {
+                    skippedExisting++;
+                    planned.push({ action: "keep", plateData: plateData, comp: match.comp, targetFolder: targetFolder });
+                    if (preview.length < 12) preview.push(compName + "\n  уже существует, новую не создавать");
+                }
+                continue;
+            }
+
+            if (settings.graphicType === "Плашка" && (baseCompByPerson[plateData.personKey] || plannedBaseByPerson[plateData.personKey])) {
+                linkedPlates++;
+                planned.push({ action: "create-linked", plateData: plateData, targetFolder: targetFolder });
+                if (preview.length < 12) preview.push(compName + "\n  создать linked-плашку");
+            } else {
+                planned.push({ action: "create", plateData: plateData, targetFolder: targetFolder });
+                if (preview.length < 12) preview.push(compName + "\n  создать композицию");
+                plannedBaseByPerson[plateData.personKey] = true;
+            }
+            created++;
+        }
+
+        return {
+            rows: rows,
+            planned: planned,
+            created: created,
+            skipped: skipped,
+            skippedExisting: skippedExisting,
+            recreated: recreated,
+            linkedPlates: linkedPlates,
+            skippedByShift: skippedByShift,
+            conflicts: conflicts,
+            preview: preview,
+            touchedFolders: touchedFolders,
+            templateWarnings: templateWarnings
+        };
+    }
+
     function generatePlates(masterComp, settings, runtime) {
-        app.beginUndoGroup("Person Plates from Sheet");
         try {
-            var templateWarnings = validateTemplate(masterComp, settings);
+            var plan = planPlateGeneration(masterComp, settings, runtime);
+            var rows = plan.rows;
+            var confirmMessage = "План импорта плашек\n\n" +
+                "Создать: " + plan.created + "\n" +
+                "Оставить существующие: " + plan.skippedExisting + "\n" +
+                "Пересоздать существующие: " + plan.recreated + "\n" +
+                "Linked-плашки: " + plan.linkedPlates + "\n" +
+                "Конфликты: " + plan.conflicts + "\n" +
+                "Пропущено строк: " + plan.skipped + "\n" +
+                "Пропущено по смене: " + plan.skippedByShift + "\n" +
+                "Всего строк: " + rows.length + "\n" +
+                (plan.templateWarnings.length > 0 ? "\nПредупреждения шаблона:\n- " + plan.templateWarnings.join("\n- ") + "\n" : "") +
+                (plan.preview.length > 0 ? "\nПервые действия:\n" + plan.preview.join("\n\n") + "\n" : "");
+            if (settings.previewOnly === true) {
+                return {
+                    created: plan.created,
+                    skippedExisting: plan.skippedExisting,
+                    skipped: plan.skipped,
+                    skippedByShift: plan.skippedByShift,
+                    recreated: plan.recreated,
+                    duplicatesRemoved: 0,
+                    conflicts: plan.conflicts,
+                    linkedPlates: plan.linkedPlates,
+                    preview: plan.preview,
+                    planMessage: confirmMessage
+                };
+            }
+            if (settings.autoConfirm !== true && !confirm(confirmMessage + "\nПрименить эти изменения?")) {
+                return {
+                    created: 0,
+                    skippedExisting: plan.skippedExisting,
+                    skipped: plan.skipped,
+                    skippedByShift: plan.skippedByShift,
+                    recreated: 0,
+                    duplicatesRemoved: 0,
+                    conflicts: plan.conflicts,
+                    linkedPlates: plan.linkedPlates,
+                    preview: plan.preview
+                };
+            }
 
-            var result = downloadData(settings, runtime);
-            var rows = result.rows;
-            if (!rows || rows.length === 0) throw new Error("Данные пусты.");
-
-            var targetFolder = targetFolderForMaster(masterComp, settings);
+            app.beginUndoGroup("Person Plates from Sheet");
             var created = 0;
-            var skipped = 0;
+            var skipped = plan.skipped;
             var skippedExisting = 0;
             var recreated = 0;
             var noPhoto = 0;
             var linkedPlates = 0;
-            var skippedByShift = 0;
+            var skippedByShift = plan.skippedByShift;
             var textErrors = [];
             var photoErrors = [];
-            var namesCreatedThisRun = {};
             var baseCompByPerson = {};
-            var plateRows = [];
-
-            for (var i = 0; i < rows.length; i++) {
-                var row = normalizeRow(rows[i]);
-                if (!rowMatchesShiftFilter(row, settings)) {
-                    skippedByShift++;
-                    continue;
-                }
-
-                var plateData = plateDataFromRow(row, settings);
-                plateData.rowIndex = i;
-                plateData.personKey = personAliasKey(plateData.compPersonName || plateData.name || plateData.rawName);
-                plateRows.push(plateData);
-            }
-
-            plateRows.sort(function(a, b) {
-                var at = timeSortKey(a.timePrefix);
-                var bt = timeSortKey(b.timePrefix);
-                if (at !== bt) return at - bt;
-                return a.rowIndex - b.rowIndex;
-            });
-
-            for (var i = 0; i < plateRows.length; i++) {
-                var plateData = plateRows[i];
+            for (var i = 0; i < plan.planned.length; i++) {
+                var step = plan.planned[i];
+                var plateData = step.plateData;
                 var name = plateData.name;
                 var position = plateData.position;
                 var photoPath = plateData.photoPath;
-
-                if (name === "" || name.indexOf("#") === 0 || name.indexOf("#VALUE!") !== -1) {
-                    skipped++;
-                    continue;
-                }
-
                 var compName = plateData.compName;
-                if (namesCreatedThisRun[compName] === true) {
+                var targetFolder = step.targetFolder;
+                var manualTextOverrides = null;
+                if (step.action === "keep") {
+                    if (!baseCompByPerson[plateData.personKey]) baseCompByPerson[plateData.personKey] = step.comp;
+                    writePlateMeta(step.comp, buildPlateMeta(settings, plateData));
+                    if (settings.addExistingToRenderQueue === true && settings.addToRenderQueue === true) {
+                        addCompToRenderQueue(step.comp, settings, { shift: plateData.shift, day: plateData.day });
+                    }
                     skippedExisting++;
                     continue;
                 }
-
-                var existingComps = findCompsByNameInFolder(compName, targetFolder, masterComp);
-                if (existingComps.length > 0) {
-                    if (settings.recreateExistingComps === true) {
-                        removeComps(existingComps);
-                        recreated += existingComps.length;
+                if (step.action === "recreate") {
+                    manualTextOverrides = captureManualTextOverrides(step.comp, settings);
+                    if (step.exactMatches && step.exactMatches.length > 0) {
+                        removeComps(step.exactMatches);
+                        recreated += step.exactMatches.length;
                     } else {
-                        if (!baseCompByPerson[plateData.personKey]) baseCompByPerson[plateData.personKey] = existingComps[0];
-                        writePlateMeta(existingComps[0], buildPlateMeta(settings, plateData));
-                        skippedExisting++;
-                        continue;
+                        removeComps([step.comp]);
+                        recreated++;
                     }
                 }
 
                 var plateNumber = ("000" + (created + 1)).slice(-3);
                 var sourceBaseComp = baseCompByPerson[plateData.personKey];
                 var comp;
-                if (settings.graphicType === "Плашка" && sourceBaseComp) {
+                if (step.action === "create-linked" && sourceBaseComp) {
                     comp = makeLinkedPlateComp(masterComp, targetFolder, compName, sourceBaseComp);
                     linkedPlates++;
                 } else {
@@ -1856,14 +2261,16 @@
                     comp.name = compName;
 
                     try {
-                        var nameLayer = setTextLayer(comp, settings.nameLayer, settings.nameLayerIndex, name);
+                        var finalNameText = (manualTextOverrides && manualTextOverrides.name !== "") ? manualTextOverrides.name : name;
+                        var nameLayer = setTextLayer(comp, settings.nameLayer, settings.nameLayerIndex, finalNameText);
                         applyNameExpression(nameLayer);
                     } catch (nameTextError) {
                         if (textErrors.length < 8) textErrors.push(name + ": не записано имя (" + nameTextError.toString() + ")");
                     }
 
                     try {
-                        var positionLayer = setTextLayer(comp, settings.positionLayer, settings.positionLayerIndex, position);
+                        var finalPositionText = (manualTextOverrides && manualTextOverrides.position !== "") ? manualTextOverrides.position : position;
+                        var positionLayer = setTextLayer(comp, settings.positionLayer, settings.positionLayerIndex, finalPositionText);
                         applyPositionExpression(positionLayer, "должность не задана");
                     } catch (positionTextError) {
                         if (textErrors.length < 8) textErrors.push(name + ": не записана должность (" + positionTextError.toString() + ")");
@@ -1893,35 +2300,94 @@
                 }
 
                 if (settings.addToRenderQueue) {
-                    app.project.renderQueue.items.add(comp);
+                    addCompToRenderQueue(comp, settings, { shift: plateData.shift, day: plateData.day });
                 }
                 writePlateMeta(comp, buildPlateMeta(settings, plateData));
-                namesCreatedThisRun[compName] = true;
                 created++;
             }
 
-            alert(
-                "Готово.\n\n" +
-                "Создано композиций: " + created + "\n" +
-                "Пересоздано старых композиций: " + recreated + "\n" +
-                "Уже были, оставлены без изменений: " + skippedExisting + "\n" +
-                "Пропущено строк: " + skipped + "\n" +
-                "Пропущено по смене: " + skippedByShift + "\n" +
-                "Повторных плашек-ссылок: " + linkedPlates + "\n" +
-                (settings.autoImportPhotos === false ? "Фото: автоматическое подтягивание выключено\n" : "Без фото: " + noPhoto + "\n") +
-                "Всего строк: " + rows.length + "\n\n" +
-                (templateWarnings.length > 0 ? "Предупреждения шаблона:\n" + templateWarnings.join("\n") + "\n\n" : "") +
-                (textErrors.length > 0 ? "Ошибки текста, композиции оставлены как есть:\n" + textErrors.join("\n") + "\n\n" : "") +
-                (photoErrors.length > 0 ? "Ошибки фото, композиции созданы без фото:\n" + photoErrors.join("\n") + "\n\n" : "") +
-                "Фото лежат здесь:\n" + getPhotosFolder(settings).fsName,
-                SCRIPT_NAME
-            );
+            var duplicatesRemoved = removeDuplicateCompsInFolders(plan.touchedFolders, masterComp);
+
+            var summary = {
+                created: created,
+                recreated: recreated,
+                skippedExisting: skippedExisting,
+                skipped: skipped,
+                skippedByShift: skippedByShift,
+                linkedPlates: linkedPlates,
+                noPhoto: noPhoto,
+                duplicatesRemoved: duplicatesRemoved,
+                conflicts: plan.conflicts,
+                preview: plan.preview,
+                total: rows.length,
+                templateWarnings: plan.templateWarnings,
+                textErrors: textErrors,
+                photoErrors: photoErrors
+            };
+            if (settings.silent !== true) {
+                alert(
+                    "Готово.\n\n" +
+                    "Создано композиций: " + created + "\n" +
+                    "Пересоздано старых композиций: " + recreated + "\n" +
+                    "Уже были, оставлены без изменений: " + skippedExisting + "\n" +
+                    "Пропущено строк: " + skipped + "\n" +
+                    "Пропущено по смене: " + skippedByShift + "\n" +
+                    "Конфликты: " + plan.conflicts + "\n" +
+                    "Повторных плашек-ссылок: " + linkedPlates + "\n" +
+                    "Дубликатов композиций удалено: " + duplicatesRemoved + "\n" +
+                    (settings.autoImportPhotos === false ? "Фото: автоматическое подтягивание выключено\n" : "Без фото: " + noPhoto + "\n") +
+                    "Всего строк: " + rows.length + "\n\n" +
+                    (plan.templateWarnings.length > 0 ? "Предупреждения шаблона:\n" + plan.templateWarnings.join("\n") + "\n\n" : "") +
+                    (textErrors.length > 0 ? "Ошибки текста, композиции оставлены как есть:\n" + textErrors.join("\n") + "\n\n" : "") +
+                    (photoErrors.length > 0 ? "Ошибки фото, композиции созданы без фото:\n" + photoErrors.join("\n") + "\n\n" : "") +
+                    "Фото лежат здесь:\n" + getPhotosFolder(settings).fsName,
+                    SCRIPT_NAME
+                );
+            }
+            return summary;
         } catch (e) {
-            alert("Ошибка генерации:\n" + e.toString() + "\nСтрока: " + e.line, SCRIPT_NAME);
+            if (settings.silent !== true) alert("Ошибка генерации:\n" + e.toString() + "\nСтрока: " + e.line, SCRIPT_NAME);
+            throw e;
         } finally {
-            app.endUndoGroup();
+            try { app.endUndoGroup(); } catch (undoEndError) {}
         }
     }
 
-    showWindow();
+    function applyObject(target, source) {
+        if (!source) return target;
+        for (var key in source) {
+            if (source.hasOwnProperty(key)) target[key] = source[key];
+        }
+        return target;
+    }
+
+    function runAutoPreset(preset) {
+        var runtime = loadRuntimeConfig();
+        var settings = applyObject(loadSettings(), preset || {});
+        var masterComp = null;
+        if (settings.templateFolderPath) {
+            masterComp = findCompByNameInFolderPath(settings.templateCompName, settings.templateFolderPath);
+        }
+        if (!masterComp) masterComp = findCompByName(settings.templateCompName);
+        if (!masterComp) {
+            throw new Error("Не найдена композиция-шаблон:\n" + settings.templateCompName);
+        }
+        if (preset.persistSettings !== false) saveSettings(settings);
+        settings.autoConfirm = preset.autoConfirm === true;
+        settings.previewOnly = preset.previewOnly === true;
+        return generatePlates(masterComp, settings, runtime);
+    }
+
+    var autoPreset = $.global.__sheet2compPersonPlatesPreset;
+    if (autoPreset && autoPreset.autoRun === true) {
+        $.global.__sheet2compPersonPlatesPreset = null;
+        $.global.__sheet2compPersonPlatesLastResult = runAutoPreset(autoPreset);
+        return;
+    }
+
+    var ui = showWindow(thisObj);
+    if (ui instanceof Window) {
+        ui.center();
+        ui.show();
+    }
 })(this);

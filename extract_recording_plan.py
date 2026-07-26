@@ -11,9 +11,12 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+import content_quality as quality
+
 
 DEFAULT_RECORDING_URL = "https://docs.google.com/spreadsheets/d/1J6nJHM4wXF66LJO7dDNT6QgrxlQ5VPb-3B-4o7Ff0js/edit?gid=1944136331#gid=1944136331"
 DEFAULT_PEOPLE_REF_URL = "https://docs.google.com/spreadsheets/d/10C3eoaG146WgOeQeoli90dQCHPruoJ_d4_rqcyoUR8M/edit?gid=213088400#gid=213088400"
+DEFAULT_MANUAL_PLATES_URL = "https://docs.google.com/spreadsheets/d/1J6nJHM4wXF66LJO7dDNT6QgrxlQ5VPb-3B-4o7Ff0js/edit?gid=1399617264#gid=1399617264"
 DEFAULT_OUTPUT_DIR = Path.home() / "Documents" / "ae_plaque_data" / "recording"
 DEFAULT_SOURCE_REF_GIDS = ["0", "1399617264", "1878161624"]
 
@@ -168,7 +171,7 @@ def read_source(source):
     if re.match(r"^https?://", str(source or ""), re.IGNORECASE):
         return fetch_url_text(source)
     path = local_path_arg(source)
-    return path.read_text(encoding="utf-8-sig"), str(path)
+    return path.read_bytes().decode("utf-8-sig"), str(path)
 
 
 def guess_delimiter(text):
@@ -182,6 +185,8 @@ def guess_delimiter(text):
 
 
 def parse_rows(text):
+    text = str(text or "").replace("\r\n", "\n")
+    text = re.sub(r"\r *", " ", text)
     delimiter = guess_delimiter(text)
     try:
         return list(csv.reader(io.StringIO(text, newline=""), delimiter=delimiter))
@@ -252,29 +257,7 @@ def name_parts(value):
 
 
 def initials_surname_key(value):
-    text = inline_text(value)
-    compact = re.match(r"^((?:[А-ЯЁA-Z]\.\s*){1,3})([А-ЯЁA-Z][а-яё-]+)$", text)
-    if compact:
-        initials = re.sub(r"[^A-ZА-ЯЁ]", "", compact.group(1).upper())
-        return normalize_key(initials[:2] + " " + compact.group(2))
-
-    parts = name_parts(text)
-    initials = []
-    words = []
-    for part in parts:
-        letters = re.sub(r"[^A-ZА-ЯЁ]", "", part.upper())
-        if re.fullmatch(r"(?:[A-ZА-ЯЁ]\.?){1,3}", part.upper()) and letters:
-            initials.extend(list(letters))
-        else:
-            words.append(part)
-    if initials and words:
-        return normalize_key("".join(initials[:2]) + " " + words[-1])
-    if len(words) >= 2:
-        surname = words[0]
-        first = words[1]
-        patronymic = words[2] if len(words) >= 3 else ""
-        return normalize_key((first[:1] + patronymic[:1]) + " " + surname)
-    return ""
+    return quality.initials_surname_key(value)
 
 
 def split_column_names(value):
@@ -319,12 +302,15 @@ def build_people_reference(text, name_columns=None, position_columns=None, photo
         full_name = get_by_columns(row, name_columns)
         position = get_by_columns(row, position_columns)
         photo = get_by_columns(row, photo_columns)
-        if not full_name:
+        clean_name, _reason = quality.validate_person_name(full_name)
+        if not clean_name:
             continue
-        parts = name_parts(full_name)
-        short_name_key = normalize_key("{} {}".format(parts[0], parts[1])) if len(parts) >= 2 else ""
-        keys = {normalize_key(full_name), initials_surname_key(full_name), short_name_key}
-        record = {"name": full_name, "position": position, "photo": photo}
+        keys = quality.person_lookup_keys(clean_name)
+        record = {
+            "name": clean_name,
+            "position": quality.clean_position(position),
+            "photo": quality.clean_optional_value(photo),
+        }
         for key in keys:
             merge_people_record(lookup, key, record)
     return lookup
@@ -364,7 +350,7 @@ def split_people_cell(value):
         item = inline_text(raw).strip(" .,-")
         if not item or is_service_text(item):
             continue
-        item = re.sub(r"^(?:запись|видео|спикер|эксперт|гость)\s*[:\-]\s*", "", item, flags=re.IGNORECASE).strip()
+        item = quality.strip_person_annotations(item)
         if not item or is_service_text(item):
             continue
         parts.append(item)
@@ -372,18 +358,19 @@ def split_people_cell(value):
 
 
 def last_first_name(value):
-    parts = name_parts(value)
-    if not parts:
-        return ""
-    if len(parts) >= 3:
-        return "{} {}".format(parts[0], parts[1])
-    if len(parts) >= 2:
-        return "{} {}".format(parts[0], parts[1])
-    return parts[0]
+    return quality.canonical_last_first(value)
+
+
+def candidate_name_from_line(value):
+    text = quality.strip_person_annotations(value)
+    if not text:
+        return "", "placeholder"
+    candidate = text.split(",", 1)[0].strip()
+    return quality.validate_person_name(candidate)
 
 
 def display_name_from_ref_or_raw(raw_name, people_ref):
-    keys = [initials_surname_key(raw_name), normalize_key(raw_name)]
+    keys = quality.person_lookup_keys(raw_name)
     for key in keys:
         ref = people_ref.get(key) if key else None
         if ref:
@@ -427,12 +414,73 @@ def video_columns(rows):
     raise UserFacingError("В диапазоне U1:AM1 не найден маркер 'ВИДЕО'. Проверь, что выбран лист записи.")
 
 
-def build_records(recording_rows, people_ref):
+def row_values_from_text(text):
+    rows = parse_rows(text)
+    result = []
+    for index, row in enumerate(rows):
+        name = inline_text(row[0] if len(row) > 0 else "")
+        position = inline_text(row[1] if len(row) > 1 else "")
+        if not name and not position:
+            continue
+        if index == 0 and normalize_header(name) in ("фио", "фиоспикера", "имя"):
+            continue
+        result.append((name, position))
+    return result
+
+
+def build_manual_records(manual_text, people_ref, seen):
+    records = []
+    ref_matches = 0
+    ignored = 0
+    ignored_samples = []
+    for raw_name, manual_position in row_values_from_text(manual_text):
+        if is_service_text(raw_name):
+            ignored += 1
+            continue
+        candidate, reason = candidate_name_from_line(raw_name)
+        if not candidate:
+            ignored += 1
+            if len(ignored_samples) < 12:
+                ignored_samples.append({"value": inline_text(raw_name), "reason": reason, "source": "manual"})
+            continue
+        full_name, ref_position, photo, matched = display_name_from_ref_or_raw(candidate, people_ref)
+        if matched:
+            ref_matches += 1
+        position = quality.clean_position(manual_position) or ref_position
+        comp_person = last_first_name(full_name)
+        if not comp_person:
+            ignored += 1
+            continue
+        comp_name = "Запись_{}".format(comp_person)
+        key = normalize_key(comp_name)
+        if key in seen:
+            continue
+        seen.add(key)
+        records.append({
+            "ДАТА": "",
+            "ВРЕМЯ": "",
+            "ФИО спикера": full_name,
+            "Должность": position,
+            "Фото на плашку": photo,
+            "__compTimePrefix": "",
+            "ИМЯ_КОМПОЗИЦИИ": comp_name,
+            "ИСХОДНАЯ_ЯЧЕЙКА": "manual",
+        })
+    return records, {
+        "manual_ref_matches": ref_matches,
+        "manual_ignored": ignored,
+        "manual_records": len(records),
+        "manual_ignored_samples": ignored_samples,
+    }
+
+
+def build_records(recording_rows, people_ref, manual_text=""):
     columns = video_columns(recording_rows)
     records = []
     seen = set()
     ref_matches = 0
     ignored = 0
+    ignored_samples = []
     for col in columns:
         date = normalize_date(cell(recording_rows, ROW_DATES, col))
         if not date:
@@ -446,7 +494,13 @@ def build_records(recording_rows, people_ref):
                 if is_service_text(raw_name):
                     ignored += 1
                     continue
-                full_name, position, photo, matched = display_name_from_ref_or_raw(raw_name, people_ref)
+                candidate, reason = candidate_name_from_line(raw_name)
+                if not candidate:
+                    ignored += 1
+                    if len(ignored_samples) < 20:
+                        ignored_samples.append({"value": inline_text(raw_name), "reason": reason, "source": source_cell(row_index, col)})
+                    continue
+                full_name, position, photo, matched = display_name_from_ref_or_raw(candidate, people_ref)
                 if matched:
                     ref_matches += 1
                 comp_person = last_first_name(full_name)
@@ -469,7 +523,19 @@ def build_records(recording_rows, people_ref):
                     "ИМЯ_КОМПОЗИЦИИ": comp_name,
                     "ИСХОДНАЯ_ЯЧЕЙКА": source_cell(row_index, col),
                 })
-    return records, {"ref_matches": ref_matches, "ignored": ignored, "video_columns": len(columns)}
+    manual_stats = {"manual_ref_matches": 0, "manual_ignored": 0, "manual_records": 0, "manual_ignored_samples": []}
+    if inline_text(manual_text):
+        manual_records, manual_stats = build_manual_records(manual_text, people_ref, seen)
+        records.extend(manual_records)
+    return records, {
+        "ref_matches": ref_matches,
+        "ignored": ignored,
+        "video_columns": len(columns),
+        "manual_ref_matches": manual_stats["manual_ref_matches"],
+        "manual_ignored": manual_stats["manual_ignored"],
+        "manual_records": manual_stats["manual_records"],
+        "ignored_samples": ignored_samples + manual_stats["manual_ignored_samples"],
+    }
 
 
 def write_tsv(path, rows):
@@ -499,6 +565,7 @@ def parse_args(argv):
     parser.add_argument("source", nargs="?", default=DEFAULT_RECORDING_URL)
     parser.add_argument("-o", "--output-dir", default=str(DEFAULT_OUTPUT_DIR))
     parser.add_argument("--people-ref-url", default=DEFAULT_PEOPLE_REF_URL)
+    parser.add_argument("--manual-plates-url", default=DEFAULT_MANUAL_PLATES_URL)
     parser.add_argument("--ref-name-column", default="ФИО")
     parser.add_argument("--ref-position-column", default="Должность")
     parser.add_argument("--ref-photo-column", default="Фото на плашку,Ссылка на плашку,Фото,ФОТО")
@@ -543,7 +610,12 @@ def main(argv):
                 )
             )
 
-        records, stats = build_records(recording_rows, people_ref)
+        manual_text = ""
+        manual_resolved_source = ""
+        if str(args.manual_plates_url or "").strip():
+            manual_text, manual_resolved_source = read_source(args.manual_plates_url)
+
+        records, stats = build_records(recording_rows, people_ref, manual_text)
         if not records:
             raise UserFacingError("В диапазоне U1:AM25 не найдено людей для записи.")
 
@@ -554,13 +626,18 @@ def main(argv):
         report = {
             "ok": True,
             "source": resolved_source,
+            "manual_source": manual_resolved_source,
             "people_ref": ref_sources,
             "people_ref_reports": ref_reports,
             "output": str(output_dir),
             "tsv": str(tsv_path),
             "records": len(records),
             "ref_matches": stats["ref_matches"],
+            "manual_records": stats["manual_records"],
+            "manual_ref_matches": stats["manual_ref_matches"],
             "ignored": stats["ignored"],
+            "manual_ignored": stats["manual_ignored"],
+            "ignored_samples": stats["ignored_samples"],
             "video_columns": stats["video_columns"],
             "ref_sources_total": len(ref_reports),
             "ref_sources_ok": len([r for r in ref_reports if r.get("ok")]),

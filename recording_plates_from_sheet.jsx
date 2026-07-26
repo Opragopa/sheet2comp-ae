@@ -14,7 +14,12 @@
     var SETTINGS_FILE = new File(Folder.myDocuments.fsName + "/ae_recording_plates_settings.json");
     var DEFAULT_SOURCE = "https://docs.google.com/spreadsheets/d/1J6nJHM4wXF66LJO7dDNT6QgrxlQ5VPb-3B-4o7Ff0js/edit?gid=1944136331#gid=1944136331";
     var DEFAULT_REF = "https://docs.google.com/spreadsheets/d/10C3eoaG146WgOeQeoli90dQCHPruoJ_d4_rqcyoUR8M/edit?gid=213088400#gid=213088400";
+    var DEFAULT_MANUAL_PLATES = "https://docs.google.com/spreadsheets/d/1J6nJHM4wXF66LJO7dDNT6QgrxlQ5VPb-3B-4o7Ff0js/edit?gid=1399617264#gid=1399617264";
     var DEFAULT_OUTPUT_DIR = new Folder(Folder.myDocuments.fsName + "/ae_plaque_data/recording");
+    var PLATES_ROOT_PATH = "!_COMPS/!!!_ПЛАШКИ НА РЕНДЕР";
+    var RECORDING_PLATES_PATH = "!_COMPS/!!!_ПЛАШКИ НА РЕНДЕР/Запись";
+    var PLATES_MASTER_COMP = "MASTER-COMP";
+    var PLATES_OUTPUT_MODULE_TEMPLATE = "High Quality with Alpha";
 
     function trimText(value) {
         return String(value || "").replace(/^\s+|\s+$/g, "");
@@ -109,6 +114,8 @@
             quoteShellArg(settings.outputDir),
             "--people-ref-url",
             quoteShellArg(settings.refUrl),
+            "--manual-plates-url",
+            quoteShellArg(settings.manualPlatesUrl),
             "--settings-json",
             quoteShellArg(fileArg(presetFile)),
             "--status-json",
@@ -151,12 +158,20 @@
         var tsv = contentFile(outputArg, "recording_plates.tsv");
         if (!tsv.exists) throw new Error("TSV записи не создан.\n\n" + output);
         statusText.text = "Запись готова: " + status.records + " плашек";
+        var ignoredExamples = [];
+        var ignoredSamples = status.ignored_samples || [];
+        for (var sampleIndex = 0; sampleIndex < ignoredSamples.length && sampleIndex < 6; sampleIndex++) {
+            ignoredExamples.push("- " + ignoredSamples[sampleIndex].value + " [" + ignoredSamples[sampleIndex].reason + "]");
+        }
         alert(
             "Готово.\n\n" +
             "Плашки записи: " + status.records + "\n" +
+            "Добавлено из ручного списка: " + (status.manual_records || 0) + "\n" +
             "Найдено в справочнике: " + status.ref_matches + "\n" +
+            "Найдено в справочнике для ручных: " + (status.manual_ref_matches || 0) + "\n" +
             "Справочников проверено: " + (status.ref_sources_ok || 0) + " из " + (status.ref_sources_total || 0) + "\n" +
-            "Игнорировано: " + status.ignored + "\n" +
+            "Игнорировано: " + ((status.ignored || 0) + (status.manual_ignored || 0)) + "\n" +
+            (ignoredExamples.length ? "Отфильтрованные примеры:\n" + ignoredExamples.join("\n") + "\n" : "") +
             "Видео-колонок: " + status.video_columns + "\n\n" +
             "TSV:\n" + status.tsv,
             SCRIPT_NAME
@@ -177,20 +192,72 @@
         current.photoField = "Фото на плашку";
         current.shiftField = "";
         current.shiftFilter = "";
+        current.shiftName = "Запись";
+        current.dayField = "ДАТА";
         current.graphicType = "Плашка";
         current.compPrefix = "Запись";
         current.delimiter = "_";
         current.targetFolderName = "Запись";
+        current.targetFolderPath = RECORDING_PLATES_PATH;
+        current.templateCompName = PLATES_MASTER_COMP;
+        current.templateFolderPath = PLATES_ROOT_PATH;
+        current.routeByShiftDay = false;
+        current.platesRootPath = PLATES_ROOT_PATH;
+        current.outputModuleTemplate = PLATES_OUTPUT_MODULE_TEMPLATE;
+        current.queueLabelIndex = 9;
         current.autoImportPhotos = false;
         current.requirePhotoPrecomp = false;
         current.recreateExistingComps = false;
+        current.addExistingToRenderQueue = true;
+        current.addToRenderQueue = true;
         writeJsonFile(PERSON_SETTINGS_FILE, current);
+    }
+
+    function runPersonPlatesAuto(settings) {
+        var tsv = contentFile(settings.outputDir, "recording_plates.tsv");
+        if (!tsv.exists) throw new Error("TSV записи не создан:\n" + tsv.fsName);
+        if (!PERSON_SCRIPT.exists) throw new Error("Не найден скрипт:\n" + PERSON_SCRIPT.fsName);
+
+        savePersonPreset(settings);
+        $.global.__sheet2compPersonPlatesPreset = {
+            autoRun: true,
+            silent: true,
+            sheetUrl: fileArg(tsv),
+            sheetGid: "0",
+            dataMode: "Таблица",
+            nameField: "ФИО спикера",
+            positionField: "Должность",
+            photoField: "Фото на плашку",
+            shiftField: "",
+            shiftFilter: "",
+            shiftName: "Запись",
+            dayField: "ДАТА",
+            graphicType: "Плашка",
+            compPrefix: "Запись",
+            delimiter: "_",
+            templateCompName: PLATES_MASTER_COMP,
+            templateFolderPath: PLATES_ROOT_PATH,
+            targetFolderName: "Запись",
+            targetFolderPath: RECORDING_PLATES_PATH,
+            routeByShiftDay: false,
+            platesRootPath: PLATES_ROOT_PATH,
+            outputModuleTemplate: PLATES_OUTPUT_MODULE_TEMPLATE,
+            queueLabelIndex: 9,
+            autoImportPhotos: false,
+            requirePhotoPrecomp: false,
+            recreateExistingComps: false,
+            addExistingToRenderQueue: true,
+            addToRenderQueue: true
+        };
+        $.evalFile(PERSON_SCRIPT);
+        return $.global.__sheet2compPersonPlatesLastResult || null;
     }
 
     function defaultSettings() {
         return {
             source: DEFAULT_SOURCE,
             refUrl: DEFAULT_REF,
+            manualPlatesUrl: DEFAULT_MANUAL_PLATES,
             refNameColumn: "ФИО",
             refPositionColumn: "Должность",
             refPhotoColumn: "Фото на плашку,Ссылка на плашку,Фото,ФОТО",
@@ -250,6 +317,7 @@
         panel.margins = 10;
         var sourceInput = addLabeledEdit(panel, "Таблица записи", settings.source, 64);
         var refInput = addLabeledEdit(panel, "Доп. ФИО/Должность", settings.refUrl, 64);
+        var manualInput = addLabeledEdit(panel, "Ручные плашки", settings.manualPlatesUrl, 64);
         var refNameInput = addLabeledEdit(panel, "Колонка ФИО", settings.refNameColumn || "ФИО", 28);
         var refPositionInput = addLabeledEdit(panel, "Колонка должности", settings.refPositionColumn || "Должность", 28);
         var refPhotoInput = addLabeledEdit(panel, "Колонка фото", settings.refPhotoColumn || "Фото на плашку,Ссылка на плашку,Фото,ФОТО", 42);
@@ -260,6 +328,7 @@
         var saveButton = buttons.add("button", undefined, "Сохранить");
         var prepareButton = buttons.add("button", undefined, "Подготовить TSV");
         var openButton = buttons.add("button", undefined, "Открыть плашки");
+        var updateButton = buttons.add("button", undefined, "Обновить запись");
         var statusText = buttons.add("statictext", undefined, settings.lastStatus || "TSV еще не готовился");
         statusText.characters = 38;
 
@@ -267,6 +336,7 @@
             return {
                 source: sourceInput.text,
                 refUrl: refInput.text,
+                manualPlatesUrl: manualInput.text,
                 refNameColumn: refNameInput.text,
                 refPositionColumn: refPositionInput.text,
                 refPhotoColumn: refPhotoInput.text,
@@ -302,6 +372,32 @@
                 if (!PERSON_SCRIPT.exists) throw new Error("Не найден скрипт:\n" + PERSON_SCRIPT.fsName);
                 $.evalFile(PERSON_SCRIPT);
             } catch (err) {
+                alert(SCRIPT_NAME + "\n\n" + (err.message || err.toString()));
+            }
+        };
+
+        updateButton.onClick = function() {
+            try {
+                var current = collect("Обновляю запись...");
+                saveSettings(current);
+                runPrepare(current, statusText);
+                outputInput.text = current.outputDir;
+                statusText.text = "Добавляю запись в очередь...";
+                var result = runPersonPlatesAuto(current);
+                statusText.text = "Запись обновлена";
+                saveSettings(collect(statusText.text));
+                alert(
+                    "Запись обновлена.\n\n" +
+                    "Создано плашек: " + (result ? result.created : 0) + "\n" +
+                    "Уже были: " + (result ? result.skippedExisting : 0) + "\n" +
+                    "Пропущено: " + (result ? result.skipped : 0) + "\n" +
+                    "Дубликатов композиций удалено: " + (result ? (result.duplicatesRemoved || 0) : 0) + "\n\n" +
+                    "Папка AE:\n" + RECORDING_PLATES_PATH,
+                    SCRIPT_NAME
+                );
+            } catch (err) {
+                statusText.text = "Ошибка обновления записи";
+                saveSettings(collect(statusText.text));
                 alert(SCRIPT_NAME + "\n\n" + (err.message || err.toString()));
             }
         };

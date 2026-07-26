@@ -95,6 +95,9 @@ if not defined AE_SCRIPTS (
   exit /b 1
 )
 
+for %%D in ("%AE_SCRIPTS%\..") do set "AE_APP_DIR=%%~fD"
+set "AE_SCRIPTUI_PANELS=%AE_APP_DIR%\ScriptUI Panels"
+
 set "PYTHON_CMD="
 for /f "delims=" %%P in ('py -3 -c "import sys; print(sys.executable)" 2^>nul') do set "PYTHON_CMD=%%P"
 if not defined PYTHON_CMD (
@@ -107,6 +110,8 @@ if not defined PYTHON_CMD (
 )
 
 if not exist "%AE_SCRIPTS%" mkdir "%AE_SCRIPTS%"
+if errorlevel 1 exit /b 1
+if not exist "%AE_SCRIPTUI_PANELS%" mkdir "%AE_SCRIPTUI_PANELS%"
 if errorlevel 1 exit /b 1
 
 copy /Y "%SCRIPT_DIR%%JSX%" "%AE_SCRIPTS%\%JSX%" >nul
@@ -125,6 +130,12 @@ copy /Y "%SCRIPT_DIR%%CONTENT_PLAN_JSX%" "%AE_SCRIPTS%\%CONTENT_PLAN_JSX%" >nul
 if errorlevel 1 exit /b 1
 
 copy /Y "%SCRIPT_DIR%%RECORDING_JSX%" "%AE_SCRIPTS%\%RECORDING_JSX%" >nul
+if errorlevel 1 exit /b 1
+copy /Y "%SCRIPT_DIR%%PERSON_JSX%" "%AE_SCRIPTUI_PANELS%\%PERSON_JSX%" >nul
+if errorlevel 1 exit /b 1
+copy /Y "%SCRIPT_DIR%%TOPICS_JSX%" "%AE_SCRIPTUI_PANELS%\%TOPICS_JSX%" >nul
+if errorlevel 1 exit /b 1
+copy /Y "%SCRIPT_DIR%%CONTENT_PLAN_JSX%" "%AE_SCRIPTUI_PANELS%\%CONTENT_PLAN_JSX%" >nul
 if errorlevel 1 exit /b 1
 
 copy /Y "%SCRIPT_DIR%%TOPICS_EXAMPLE%" "%AE_SCRIPTS%\%TOPICS_EXAMPLE%" >nul
@@ -153,6 +164,8 @@ if errorlevel 1 exit /b 1
 
 echo Installed to:
 echo %AE_SCRIPTS%
+echo Panels:
+echo %AE_SCRIPTUI_PANELS%
 echo Python:
 echo %PYTHON_CMD%
 endlocal

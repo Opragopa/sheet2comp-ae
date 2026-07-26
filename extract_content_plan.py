@@ -12,10 +12,13 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+import content_quality as quality
+
 
 DEFAULT_URL = "https://docs.google.com/spreadsheets/d/10C3eoaG146WgOeQeoli90dQCHPruoJ_d4_rqcyoUR8M/edit?gid=213088400#gid=213088400"
 DEFAULT_PEOPLE_REF_URL = "https://docs.google.com/spreadsheets/d/1J6nJHM4wXF66LJO7dDNT6QgrxlQ5VPb-3B-4o7Ff0js/edit?gid=1399617264#gid=1399617264"
 DEFAULT_OUTPUT_DIR = Path.home() / "Documents" / "ae_plaque_data" / "content_plan"
+DEFAULT_PEOPLE_REF_GIDS = ["1399617264", "0", "1878161624"]
 TIME_HEADER = "ВРЕМЯ"
 COMP_NAME_HEADER = "ИМЯ_КОМПОЗИЦИИ"
 
@@ -39,15 +42,41 @@ PEOPLE_FIELDS = ["person_id", "ФИО спикера", "normalized_name", "До�
 BADGE_FIELDS = ["session_id", "person_id", "ДЕНЬ", "ДАТА", "ВРЕМЯ", "НАЧАЛО", "ПЛОЩАДКА", "ФИО спикера", "Должность", "Фото на плашку"]
 CARD_FIELDS = ["person_id", "ФИО спикера", "Должность", "Фото на плашку", "card_status", "card_warning"]
 LEGACY_SESSION_FIELDS = ["ДЕНЬ", "ДАТА", "ВРЕМЯ", "ПЛОЩАДКА", "ТЕМА", "ОПИСАНИЕ", "ТИП", COMP_NAME_HEADER, "ИСХОДНАЯ_ЯЧЕЙКА"]
+AE_READY_REQUIRED_TABS = {
+    "content_plan_sessions": LEGACY_SESSION_FIELDS,
+    "content_plan_plates": BADGE_FIELDS,
+    "content_plan_cards": CARD_FIELDS,
+}
+AE_READY_OPTIONAL_TABS = {
+    "content_plan_all_people": PEOPLE_FIELDS,
+    "content_plan_topics_model": TOPIC_FIELDS,
+    "content_plan_sessions_model": SESSION_MODEL_FIELDS,
+    "content_plan_session_people": SESSION_PEOPLE_FIELDS,
+    "warnings": ["level", "source_cell", "message", "raw_text", "confidence"],
+    "source_cells": ["source_cell", "ДЕНЬ", "ДАТА", "ВРЕМЯ", "ПЛОЩАДКА", "raw_text", "parser_topic", "parser_people_count", "llm_applied", "llm_confidence"],
+    "import_report": ["key", "value"],
+}
 
 ROLE_RE = re.compile(r"(?is)(Эксперты?|Эксперт|Гости|Спикеры?|Спикер|Модератор|Ведущий)\s*:\s*")
 NAME_START_RE = re.compile(
-    r"(?=(?:^|\s)((?:[А-ЯЁA-Z]\.\s*){1,3}[А-ЯЁ][а-яё-]+|[А-ЯЁ][а-яё-]+\s+[А-ЯЁ][а-яё-]+\s+[А-ЯЁ][а-яё-]+(?=\s*,)))"
+    r"(?=(?:^|\s)((?:[А-ЯЁA-Z]\.\s*){1,3}[А-ЯЁ][а-яё-]+|[А-ЯЁ][а-яё-]+\s+[А-ЯЁ][а-яё-]+(?:\s+[А-ЯЁ][а-яё-]+)?(?=\s*,)))"
 )
 STOP_RE = re.compile(
     r"(?is)(?:^|\s)(?:▶\s*)?(?:Статус|Модератор|Ведущий|СЦЕНАРИЙ(?:\s+ДЛЯ\s+РПГ)?|ЗАЛ|СЕТАП|РАЙДЕР|КОНТЕНТ|ВОЛОНТЕРЫ|Техзапрос|Техзадание|Место)\s*:"
 )
 SERVICE_RE = re.compile(r"(?i)^(перерыв|обед|ужин|завтрак|зарядка|отъезд|подъ[её]м|рефлексия|креатон(?:\s*-.*)?|\d+)$")
+DESCRIPTION_LABELS = [
+    "Главная встреча дня",
+    "Пленарная сессия",
+    "Установочная встреча",
+    "Шоу-защита проектов",
+    "Презентация проекта",
+    "Мастер-класс",
+    "Дискуссия",
+    "Лекция",
+    "Дебаты",
+    "Встреча",
+]
 
 
 class UserFacingError(Exception):
@@ -104,6 +133,21 @@ def fetch_url_text(source):
     )
 
 
+def fetch_first_available_text(urls, error_prefix):
+    errors = []
+    for url in urls:
+        for attempt in range(3):
+            request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            try:
+                with urllib.request.urlopen(request, timeout=60) as response:
+                    return response.read().decode("utf-8-sig"), url
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                errors.append("{}: {}".format(url, exc))
+                if attempt < 2:
+                    time.sleep(1.5 * (attempt + 1))
+    raise UserFacingError("{}: {}".format(error_prefix, errors[-1] if errors else "unknown"))
+
+
 def local_path_arg(value):
     text = str(value or "").strip()
     if text.startswith("file://"):
@@ -117,7 +161,7 @@ def read_source(source):
     if re.match(r"^https?://", source, re.IGNORECASE):
         return fetch_url_text(source)
     path = local_path_arg(source)
-    return path.read_text(encoding="utf-8-sig"), str(path)
+    return path.read_bytes().decode("utf-8-sig"), str(path)
 
 
 def guess_delimiter(text):
@@ -131,6 +175,8 @@ def guess_delimiter(text):
 
 
 def parse_table_rows(text, delimiter="auto"):
+    text = str(text or "").replace("\r\n", "\n")
+    text = re.sub(r"\r *", " ", text)
     delimiter_map = {"tab": "\t", "comma": ",", "semicolon": ";"}
     actual = guess_delimiter(text) if delimiter == "auto" else delimiter_map.get(delimiter, delimiter)
     try:
@@ -174,18 +220,86 @@ def get_by_normalized_column(row, names):
     return ""
 
 
+def google_sheet_id(url):
+    parsed = urllib.parse.urlparse(str(url or "").strip())
+    match = re.search(r"/spreadsheets/d/([^/]+)", parsed.path)
+    return match.group(1) if match else ""
+
+
+def is_google_sheet_url(value):
+    parsed = urllib.parse.urlparse(str(value or "").strip())
+    return "docs.google.com" in parsed.netloc and "/spreadsheets/d/" in parsed.path
+
+
+def google_sheet_tab_urls(url, sheet_name):
+    sheet_id = google_sheet_id(url)
+    if not sheet_id:
+        return [str(url or "").strip()]
+    encoded_sheet = urllib.parse.quote(sheet_name, safe="")
+    return [
+        "https://docs.google.com/spreadsheets/d/{}/gviz/tq?tqx=out:csv&sheet={}".format(sheet_id, encoded_sheet),
+        "https://docs.google.com/spreadsheets/d/{}/gviz/tq?sheet={}&tqx=out:csv".format(sheet_id, encoded_sheet),
+    ]
+
+
+def people_reference_sources(value):
+    sources = []
+    seen = set()
+    for raw in re.split(r"[\n\r,;]+", str(value or "")):
+        source = raw.strip()
+        if not source:
+            continue
+        sheet_id = google_sheet_id(source)
+        candidates = [source]
+        if sheet_id:
+            candidates += [
+                "https://docs.google.com/spreadsheets/d/{}/edit?gid={}#gid={}".format(sheet_id, gid, gid)
+                for gid in DEFAULT_PEOPLE_REF_GIDS
+            ]
+        for candidate in candidates:
+            key = google_sheet_export_url(candidate)
+            if key not in seen:
+                seen.add(key)
+                sources.append(candidate)
+    return sources
+
+
 def build_people_reference(text):
     lookup = {}
     for row in row_dicts_from_text(text):
         full_name = get_by_normalized_column(row, ["ФИО", "ФИО спикера", "Имя", "Name"])
         position = get_by_normalized_column(row, ["Должность", "Регалии", "Position"])
-        if not full_name:
+        clean_name, _reason = quality.validate_person_name(full_name)
+        if not clean_name:
             continue
-        keys = {normalize_person_name(full_name), initials_surname_key(full_name)}
+        keys = quality.person_lookup_keys(clean_name)
         for key in keys:
             if key:
-                lookup[key] = {"name": full_name, "position": position}
+                current = lookup.get(key, {})
+                lookup[key] = {
+                    "name": current.get("name") or clean_name,
+                    "position": current.get("position") or quality.clean_position(position),
+                }
     return lookup
+
+
+def build_people_reference_from_sources(sources):
+    lookup = {}
+    reports = []
+    for source in sources:
+        try:
+            text, resolved = read_source(source)
+            chunk = build_people_reference(text)
+            for key, record in chunk.items():
+                current = lookup.get(key, {})
+                lookup[key] = {
+                    "name": current.get("name") or record.get("name", ""),
+                    "position": current.get("position") or record.get("position", ""),
+                }
+            reports.append({"source": resolved, "records": len(chunk), "ok": True})
+        except Exception as exc:
+            reports.append({"source": source, "records": 0, "ok": False, "error": str(exc)})
+    return lookup, reports
 
 
 def clean_text(value):
@@ -221,38 +335,7 @@ def name_word_parts(value):
 
 
 def initials_surname_key(value):
-    text = inline_text(value)
-    compact_match = re.match(r"^((?:[А-ЯЁA-Z]\.\s*){1,3})([А-ЯЁA-Z][а-яё-]+)$", text)
-    if compact_match:
-        initials = re.sub(r"[^A-ZА-ЯЁ]", "", compact_match.group(1).upper())
-        surname = compact_match.group(2)
-        if initials and surname:
-            return normalize_lookup_token(initials[:2] + " " + surname)
-
-    parts = name_word_parts(text)
-    if not parts:
-        return ""
-
-    initials = []
-    words = []
-    for part in parts:
-        letters = re.sub(r"[^A-ZА-ЯЁ]", "", part.upper())
-        if re.fullmatch(r"(?:[A-ZА-ЯЁ]\.?){1,3}", part.upper()) and letters:
-            initials.extend(list(letters))
-        else:
-            words.append(part)
-
-    if initials and words:
-        return normalize_lookup_token("".join(initials[:2]) + " " + words[-1])
-
-    if len(words) >= 2:
-        surname = words[0]
-        first = words[1]
-        patronymic = words[2] if len(words) >= 3 else ""
-        short = first[:1] + patronymic[:1]
-        if short:
-            return normalize_lookup_token(short + " " + surname)
-    return ""
+    return quality.initials_surname_key(value)
 
 
 def has_initials_name(value):
@@ -285,10 +368,7 @@ def clean_venue_header(value):
 
 def session_comp_name(venue_name, topic_title):
     title = clean_topic(topic_title)
-    if not title:
-        return ""
-    venue = clean_venue_header(venue_name)
-    return "{}/{}".format(venue, title) if venue else title
+    return title if title else ""
 
 
 def split_time(value):
@@ -352,9 +432,67 @@ def venues_from_rows(rows, layout):
 
 
 def clean_topic(value):
-    text = inline_text(value)
-    text = re.sub(r"^[«\"'“”„]+|[»\"'“”„]+$", "", text)
-    return text.strip(" -—")
+    return quality.clean_topic(value)
+
+
+def first_sentence(text):
+    value = inline_text(text)
+    if not value:
+        return ""
+    parts = re.split(r"(?<=[.!?])\s+", value, maxsplit=1)
+    return parts[0].strip(" \"'«»„“”.,;:-–—")
+
+
+def short_description_label(text):
+    value = inline_text(text)
+    for label in DESCRIPTION_LABELS:
+        pattern = r"^{}\b".format(re.escape(label))
+        if re.search(pattern, value, flags=re.IGNORECASE):
+            return label
+    return ""
+
+
+def trim_repeated_topic(description, topic):
+    desc = inline_text(description)
+    top = clean_topic(topic)
+    if not desc or not top:
+        return desc
+    patterns = [
+        r'[«"]?\s*{}\s*[»"]?'.format(re.escape(top)),
+        r"\b{}\b".format(re.escape(top)),
+    ]
+    for pattern in patterns:
+        desc = re.sub(pattern, " ", desc, flags=re.IGNORECASE)
+    return inline_text(desc).strip(" \"'«»„“”.,;:-–—")
+
+
+def normalize_topic_description(topic, description):
+    topic_text = clean_topic(topic)
+    description_text = quality.clean_position(description)
+    if topic_text and re.search(r"[.!?]\s+", topic_text):
+        topic_text = first_sentence(topic_text)
+    if description_text:
+        description_text = trim_repeated_topic(description_text, topic_text)
+        label = short_description_label(description_text)
+        sentence = first_sentence(description_text)
+        if label and normalize_key(description_text) == normalize_key(label):
+            description_text = "" if normalize_key(label) == normalize_key("Встреча") else label
+        elif sentence and len(sentence.split()) <= 8:
+            description_text = sentence
+            if normalize_key(description_text) == normalize_key("Встреча"):
+                description_text = ""
+        else:
+            description_text = ""
+    if description_text and normalize_key(description_text) == normalize_key(topic_text):
+        description_text = ""
+    return topic_text, description_text
+
+
+def comp_venue_name(value):
+    venue = clean_venue_header(value)
+    if normalize_key(venue) == normalize_key("АМФИТЕАТР ОСНОВНАЯ / ПЛЕНАРНАЯ"):
+        return "АМФИТЕАТР"
+    return venue
 
 
 def strip_file_tokens(text):
@@ -363,8 +501,23 @@ def strip_file_tokens(text):
     return re.sub(r"\s+", " ", text).strip()
 
 
+def name_start_matches(value):
+    matches = []
+    last_end = -1
+    for match in NAME_START_RE.finditer(inline_text(value)):
+        if match.start(1) < last_end:
+            continue
+        candidate, _reason = quality.validate_person_name(match.group(1))
+        if not candidate:
+            continue
+        matches.append(match)
+        last_end = match.end(1)
+    return matches
+
+
 def extract_topic_and_description(cell):
-    text = inline_text(cell)
+    raw_text = str(cell or "").replace("\r\n", "\n").replace("\r", "\n")
+    text = inline_text(raw_text)
     topic_match = re.search(
         r"(?is)(?:^|\s)Тема\s*:\s*(.+?)(?=\s+(?:Эксперты?|Гости|Спикеры?|Эксперт|Модератор|Ведущий|СЦЕНАРИЙ(?:\s+ДЛЯ\s+РПГ)?|ЗАЛ|СЕТАП|РАЙДЕР|КОНТЕНТ)\s*:|$)",
         text,
@@ -372,16 +525,42 @@ def extract_topic_and_description(cell):
     if topic_match:
         topic = clean_topic(topic_match.group(1))
         description = strip_file_tokens(text[: topic_match.start()]).strip(" -—")
-        return topic, description
+        return normalize_topic_description(topic, description)
+
+    head_lines = []
+    for raw_line in raw_text.splitlines():
+        line = inline_text(raw_line)
+        if not line:
+            continue
+        role_match = ROLE_RE.search(line)
+        if role_match:
+            prefix = inline_text(line[: role_match.start()])
+            if prefix:
+                head_lines.append(prefix)
+            break
+        head_lines.append(line)
+    if len(head_lines) >= 2:
+        return normalize_topic_description(head_lines[0], " ".join(head_lines[1:]))
 
     first_role = ROLE_RE.search(text)
     head = text[: first_role.start()] if first_role else text
     head = strip_file_tokens(head).strip(" -—")
     quote = re.search(r"«([^»\n]{8,})»", head) or re.search(r"\"([^\"\n]{8,})\"", head)
     if quote:
-        return clean_topic(quote.group(1)), head
+        return normalize_topic_description(quote.group(1), head)
     if first_role and len(head) > 10 and not SERVICE_RE.match(head):
-        return clean_topic(head), head
+        head_name_starts = name_start_matches(head)
+        if head_name_starts:
+            head = head[: head_name_starts[0].start(1)].strip(" -—")
+        sentence = first_sentence(head)
+        description = head[len(sentence) :].strip(" -—")
+        return normalize_topic_description(sentence or head, description or head)
+    name_starts = name_start_matches(text)
+    if len(name_starts) >= 2:
+        head = strip_file_tokens(text[: name_starts[0].start(1)]).strip(" -—")
+        topic = clean_topic(head)
+        if topic:
+            return normalize_topic_description(topic, head)
     return "", ""
 
 
@@ -391,17 +570,58 @@ def is_content_cell(cell):
         return False
     if ROLE_RE.search(text) or re.search(r"(?i)(?:^|\s)Тема\s*:", text):
         return True
+    if len(name_start_matches(text)) >= 2:
+        return True
     return False
 
 
-def split_people_block(block):
-    text = inline_text(block)
-    text = STOP_RE.split(text, maxsplit=1)[0]
-    text = re.sub(r"\((?:подтвержден[аы]?|уточняется)\)", " ", text, flags=re.IGNORECASE)
-    text = re.sub(r"\s+-\s+ПРЕЗЕНТАЦИ[ЯИ].*?(?=(?:[А-ЯЁA-Z]\.)|$)", " ", text)
-    starts = [match.start(1) for match in NAME_START_RE.finditer(text)]
-    if len(starts) <= 1:
+def reference_person(people_reference, name):
+    if not people_reference:
+        return None
+    for key in quality.person_lookup_keys(name):
+        if key and people_reference.get(key):
+            return people_reference[key]
+    return None
+
+
+def split_people_block(block, people_reference=None):
+    raw_text = clean_text(block)
+    raw_text = STOP_RE.split(raw_text, maxsplit=1)[0]
+    raw_text = re.sub(r"\((?:подтвержден[аы]?|уточняется)\)", " ", raw_text, flags=re.IGNORECASE)
+    raw_text = re.sub(r"\s+-\s+ПРЕЗЕНТАЦИ[ЯИ].*?(?=(?:[А-ЯЁA-Z]\.)|$)", " ", raw_text)
+    raw_lines = [inline_text(line) for line in raw_text.splitlines() if inline_text(line)]
+    parsed_lines = []
+    for line in raw_lines:
+        if parse_person(line):
+            parsed_lines.append(line.strip(" ;.-"))
+    if len(parsed_lines) >= 2:
+        return parsed_lines
+    text = inline_text(raw_text)
+    matches = []
+    for match in name_start_matches(text):
+        candidate = match.group(1)
+        has_initials = any(quality.is_initials_token(part) for part in quality.name_parts(candidate))
+        before = text[max(0, match.start(1) - 24) : match.start(1)]
+        if has_initials and re.search(r"\bимени\s*$", before, flags=re.IGNORECASE) and not reference_person(people_reference, candidate):
+            continue
+        matches.append({"start": match.start(1), "end": match.end(1), "candidate": candidate})
+    if len(matches) <= 1:
         return [text.strip(" ;.-")] if text.strip(" ;.-") else []
+    accepted = [matches[0]]
+    for item in matches[1:]:
+        fragment = text[accepted[-1]["end"] : item["start"]]
+        stripped = fragment.strip()
+        if (
+            not stripped
+            or ";" in fragment
+            or "\n" in fragment
+            or re.search(r"(?:^|[\s,;])\d+\)\s*$", fragment)
+            or re.search(r"(?:^|[\s,;])[•▶-]\s*$", fragment)
+            or re.fullmatch(r"[,/|&]+", stripped)
+            or re.fullmatch(r",?\s*(?:и|and|&)\s*", stripped, flags=re.IGNORECASE)
+        ):
+            accepted.append(item)
+    starts = [item["start"] for item in accepted]
     starts.append(len(text))
     return [text[starts[i] : starts[i + 1]].strip(" ;.-") for i in range(len(starts) - 1) if text[starts[i] : starts[i + 1]].strip(" ;.-")]
 
@@ -422,7 +642,7 @@ def person_alias_key(value):
         clean = part.strip(" .,-")
         if not surname and re.search(r"(ов|ова|ев|ева|ёв|ёва|ин|ина|ын|ына|ский|ская|цкий|цкая|енко|ко|ук|юк|ич|ых|их)$", clean.lower().replace("ё", "е")):
             surname = clean
-        elif not first and not re.fullmatch(r"(?:[A-ZА-ЯЁ]\.?){1,3}", clean.upper()):
+        elif not first and not quality.is_initials_token(clean):
             first = clean
     if not surname:
         surname = parts[0]
@@ -434,8 +654,8 @@ def person_alias_key(value):
 
 def person_name_quality(value):
     parts = name_word_parts(value)
-    full_parts = [part for part in parts if not re.fullmatch(r"(?:[A-ZА-ЯЁ]\.?){1,3}", part.upper())]
-    initial_parts = [part for part in parts if re.fullmatch(r"(?:[A-ZА-ЯЁ]\.?){1,3}", part.upper())]
+    full_parts = [part for part in parts if not quality.is_initials_token(part)]
+    initial_parts = [part for part in parts if quality.is_initials_token(part)]
     return len(full_parts) * 10 - len(initial_parts) + len(inline_text(value))
 
 
@@ -450,8 +670,10 @@ def parse_person(piece):
         if not match:
             return None
         name, position = match.group(1), match.group(2) or ""
-    name = re.sub(r"^[▶\s]+", "", inline_text(name)).strip(" .,-")
-    position = inline_text(position).strip(" .,-")
+    name, _reason = quality.validate_person_name(name)
+    position = quality.clean_position(position)
+    if not name:
+        return None
     key = normalize_person_name(name)
     if len(name) < 3 or key in ("фио", "изкомандымодераторов"):
         return None
@@ -461,7 +683,7 @@ def parse_person(piece):
 def enrich_person_from_reference(person, people_reference):
     if not people_reference:
         return person, False
-    keys = [initials_surname_key(person["name"]), person["normalized_name"]]
+    keys = quality.person_lookup_keys(person["name"])
     for key in keys:
         ref = people_reference.get(key) if key else None
         if not ref:
@@ -470,14 +692,15 @@ def enrich_person_from_reference(person, people_reference):
         if ref.get("name"):
             enriched["name"] = ref["name"]
             enriched["normalized_name"] = normalize_person_name(ref["name"])
-        if ref.get("position"):
+        if ref.get("position") and not enriched.get("position"):
             enriched["position"] = ref["position"]
         return enriched, True
     return person, False
 
 
 def extract_people(cell, people_reference=None):
-    text = inline_text(cell)
+    raw_text = clean_text(cell)
+    text = inline_text(raw_text)
     people = []
     enriched_count = 0
     matches = list(ROLE_RE.finditer(text))
@@ -485,13 +708,44 @@ def extract_people(cell, people_reference=None):
         role = match.group(1)
         start = match.end()
         end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-        for piece in split_people_block(text[start:end]):
+        for piece in split_people_block(text[start:end], people_reference):
             person = parse_person(piece)
             if person:
                 person, enriched = enrich_person_from_reference(person, people_reference)
+                has_initials = any(quality.is_initials_token(part) for part in quality.name_parts(person["name"]))
+                if has_initials and people_reference is not None and not enriched:
+                    continue
                 if enriched:
                     enriched_count += 1
                 person["role"] = role
+                people.append(person)
+    if not matches and len(name_start_matches(raw_text)) >= 2:
+        for piece in split_people_block(raw_text, people_reference):
+            person = parse_person(piece)
+            if person:
+                person, enriched = enrich_person_from_reference(person, people_reference)
+                has_initials = any(quality.is_initials_token(part) for part in quality.name_parts(person["name"]))
+                if has_initials and people_reference is not None and not enriched:
+                    continue
+                if enriched:
+                    enriched_count += 1
+                person["role"] = "Спикер"
+                people.append(person)
+        return people, enriched_count
+
+    prefix_end = matches[0].start() if matches else len(text)
+    prefix = text[:prefix_end]
+    if len(name_start_matches(prefix)) >= 2:
+        for piece in split_people_block(prefix, people_reference):
+            person = parse_person(piece)
+            if person:
+                person, enriched = enrich_person_from_reference(person, people_reference)
+                has_initials = any(quality.is_initials_token(part) for part in quality.name_parts(person["name"]))
+                if has_initials and people_reference is not None and not enriched:
+                    continue
+                if enriched:
+                    enriched_count += 1
+                person["role"] = "Спикер"
                 people.append(person)
     return people, enriched_count
 
@@ -771,13 +1025,13 @@ def validate_output_dir(path):
 
 
 def parse_args(argv):
-    parser = argparse.ArgumentParser(description="Достает из программной таблицы модель topics/sessions/people/badges/cards и совместимые TSV для AE.")
-    parser.add_argument("source", nargs="?", default=DEFAULT_URL, help="Google Sheet URL, export TSV/CSV URL или локальный TSV/CSV/TXT.")
+    parser = argparse.ArgumentParser(description="Забирает готовые AE-ready вкладки из нормализованной Google Sheet и сохраняет совместимые TSV для AE.")
+    parser.add_argument("source", nargs="?", default="", help="Ссылка на AE-ready Google Sheet или локальная папка с вкладками content_plan_*.tsv/csv.")
     parser.add_argument("-o", "--output-dir", default=str(DEFAULT_OUTPUT_DIR), help="Папка для результатов.")
     parser.add_argument("--day", action="append", default=[], help="Оставить только день или дату, например 'ДЕНЬ 3', '3' или '22.07'. Можно указать несколько раз.")
     parser.add_argument("--delimiter", choices=["auto", "tab", "comma", "semicolon"], default="auto")
-    parser.add_argument("--people-ref-url", default=DEFAULT_PEOPLE_REF_URL, help="Google Sheet/TSV справочник с колонками ФИО и Должность для расшифровки инициалов.")
-    parser.add_argument("--no-people-ref", action="store_true", help="Не использовать справочник ФИО/Должность.")
+    parser.add_argument("--people-ref-url", default=DEFAULT_PEOPLE_REF_URL, help="Устаревший параметр, сохранен для совместимости.")
+    parser.add_argument("--no-people-ref", action="store_true", help="Устаревший параметр, сохранен для совместимости.")
     parser.add_argument("--status-json", default="", help="Служебный JSON-отчет для After Effects, UTF-8.")
     return parser.parse_args(argv)
 
@@ -812,40 +1066,286 @@ def stable_records_hash(records):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def filter_rows_by_day(rows, allowed_days):
+    if not allowed_days:
+        return list(rows)
+    filtered = []
+    for row in rows:
+        day_key = normalize_key(row.get("ДЕНЬ", ""))
+        date_key = normalize_key(row.get("ДАТА", ""))
+        if day_key in allowed_days or date_key in allowed_days:
+            filtered.append(row)
+    return filtered
+
+
+def read_ae_ready_tab_from_sheet(url, sheet_name):
+    raw_text, resolved = fetch_first_available_text(
+        google_sheet_tab_urls(url, sheet_name),
+        "Не удалось скачать вкладку '{}' из AE-ready таблицы".format(sheet_name),
+    )
+    if "<html" in raw_text[:1000].lower() or "<!doctype html" in raw_text[:1000].lower():
+        raise UserFacingError("Вкладка '{}' вернула HTML вместо CSV/TSV.".format(sheet_name))
+    return row_dicts_from_text(raw_text), resolved, raw_text
+
+
+def read_ae_ready_tab_from_directory(directory, sheet_name):
+    for suffix in ("tsv", "csv"):
+        path = directory / "{}.{}".format(sheet_name, suffix)
+        if path.exists():
+            raw_text = path.read_text(encoding="utf-8-sig")
+            return row_dicts_from_text(raw_text), str(path), raw_text
+    return None, "", ""
+
+
+def load_ae_ready_source(source):
+    text = str(source or "").strip()
+    if not text:
+        raise UserFacingError("Укажи ссылку на AE-ready Google Sheet или папку с выгруженными вкладками.")
+
+    if re.match(r"^https?://", text, re.IGNORECASE):
+        if not is_google_sheet_url(text):
+            raise UserFacingError("Нужна ссылка именно на AE-ready Google Sheet.")
+        tabs = {}
+        resolved_sources = {}
+        source_texts = {}
+        for sheet_name in list(AE_READY_REQUIRED_TABS.keys()) + list(AE_READY_OPTIONAL_TABS.keys()):
+            try:
+                rows, resolved, raw_text = read_ae_ready_tab_from_sheet(text, sheet_name)
+            except UserFacingError:
+                if sheet_name in AE_READY_REQUIRED_TABS:
+                    raise
+                continue
+            tabs[sheet_name] = rows
+            resolved_sources[sheet_name] = resolved
+            source_texts[sheet_name] = raw_text
+        return {"tabs": tabs, "resolved_sources": resolved_sources, "source_texts": source_texts}
+
+    directory = local_path_arg(text)
+    if not directory.is_dir():
+        raise UserFacingError("Теперь источник должен быть AE-ready Google Sheet или папка с файлами content_plan_*.tsv/csv.")
+    tabs = {}
+    resolved_sources = {}
+    source_texts = {}
+    for sheet_name in list(AE_READY_REQUIRED_TABS.keys()) + list(AE_READY_OPTIONAL_TABS.keys()):
+        rows, resolved, raw_text = read_ae_ready_tab_from_directory(directory, sheet_name)
+        if rows is None:
+            if sheet_name in AE_READY_REQUIRED_TABS:
+                raise UserFacingError(
+                    "В папке '{}' не найден обязательный файл '{}.tsv' или '{}.csv'.".format(directory, sheet_name, sheet_name)
+                )
+            continue
+        tabs[sheet_name] = rows
+        resolved_sources[sheet_name] = resolved
+        source_texts[sheet_name] = raw_text
+    return {"tabs": tabs, "resolved_sources": resolved_sources, "source_texts": source_texts}
+
+
+def derive_topics_from_legacy_sessions(rows):
+    topics = []
+    seen = set()
+    for row in rows:
+        topic = inline_text(row.get("ТЕМА", ""))
+        key = normalize_key(topic)
+        if not topic or key in seen:
+            continue
+        seen.add(key)
+        topics.append({
+            "topic_id": stable_id("topic", key),
+            "ТЕМА": topic,
+            "ОПИСАНИЕ": inline_text(row.get("ОПИСАНИЕ", "")),
+            "ИСХОДНАЯ_ЯЧЕЙКА": inline_text(row.get("ИСХОДНАЯ_ЯЧЕЙКА", "")),
+        })
+    return topics
+
+
+def derive_sessions_model_from_legacy(rows):
+    topics = derive_topics_from_legacy_sessions(rows)
+    topic_map = {normalize_key(item["ТЕМА"]): item["topic_id"] for item in topics}
+    sessions = []
+    for row in rows:
+        topic_key = normalize_key(row.get("ТЕМА", ""))
+        time_label, time_start, time_end = split_time(row.get("ВРЕМЯ", ""))
+        session_key = "|".join([
+            inline_text(row.get("ДЕНЬ", "")),
+            inline_text(row.get("ДАТА", "")),
+            time_start,
+            time_end,
+            normalize_key(row.get("ПЛОЩАДКА", "")),
+            topic_key,
+        ])
+        sessions.append({
+            "session_id": stable_id("session", session_key),
+            "topic_id": topic_map.get(topic_key, ""),
+            "ДЕНЬ": inline_text(row.get("ДЕНЬ", "")),
+            "ДАТА": inline_text(row.get("ДАТА", "")),
+            "ВРЕМЯ": time_label,
+            "НАЧАЛО": time_start,
+            "КОНЕЦ": time_end,
+            "venue_id": stable_id("venue", row.get("ПЛОЩАДКА", "")),
+            "ПЛОЩАДКА": inline_text(row.get("ПЛОЩАДКА", "")),
+            "ФОРМАТ": inline_text(row.get("ТИП", "")),
+            "ТИП_ГРАФИКИ": "card" if "мастер-класс" in inline_text(row.get("ТИП", "")).lower() else "badge",
+            "ИСХОДНАЯ_ЯЧЕЙКА": inline_text(row.get("ИСХОДНАЯ_ЯЧЕЙКА", "")),
+        })
+    return sessions
+
+
+def derive_people_from_badges_and_cards(badges, cards):
+    people_by_key = {}
+    for row in list(badges) + list(cards):
+        name = inline_text(row.get("ФИО спикера", ""))
+        if not name:
+            continue
+        key = normalize_key(name)
+        item = people_by_key.get(key)
+        if not item:
+            item = {
+                "person_id": row.get("person_id") or stable_id("person", key),
+                "ФИО спикера": name,
+                "normalized_name": key,
+                "Должность": inline_text(row.get("Должность", "")),
+                "Фото на плашку": inline_text(row.get("Фото на плашку", "")),
+                "ИСХОДНЫЕ_ЯЧЕЙКИ": "",
+            }
+            people_by_key[key] = item
+        elif not item["Должность"] and inline_text(row.get("Должность", "")):
+            item["Должность"] = inline_text(row.get("Должность", ""))
+        if not item["Фото на плашку"] and inline_text(row.get("Фото на плашку", "")):
+            item["Фото на плашку"] = inline_text(row.get("Фото на плашку", ""))
+    return list(people_by_key.values())
+
+
+def derive_session_people_from_badges(badges, people):
+    person_id_by_key = {normalize_key(row.get("ФИО спикера", "")): row.get("person_id", "") for row in people}
+    rows = []
+    for badge in badges:
+        name = inline_text(badge.get("ФИО спикера", ""))
+        if not name:
+            continue
+        rows.append({
+            "session_id": badge.get("session_id", ""),
+            "person_id": badge.get("person_id") or person_id_by_key.get(normalize_key(name), stable_id("person", name)),
+            "ФИО спикера": name,
+            "РОЛЬ": "Спикер",
+            "Должность": inline_text(badge.get("Должность", "")),
+            "badge_needed": "1",
+            "card_needed": "0",
+            "ИСХОДНАЯ_ЯЧЕЙКА": "",
+        })
+    return rows
+
+
+def derive_venues_from_sessions(sessions):
+    venues = []
+    seen = set()
+    for row in sessions:
+        venue = inline_text(row.get("ПЛОЩАДКА", ""))
+        key = normalize_key(venue)
+        if not venue or key in seen:
+            continue
+        seen.add(key)
+        venues.append({
+            "venue_id": row.get("venue_id") or stable_id("venue", key),
+            "source_column": "",
+            "ПЛОЩАДКА": venue,
+            "ЦВЕТ": "",
+        })
+    return venues
+
+
+def parse_import_report_rows(rows):
+    report = {}
+    for row in rows:
+        key = inline_text(row.get("key", ""))
+        value = str(row.get("value", "")).strip()
+        if not key:
+            continue
+        try:
+            report[key] = json.loads(value)
+        except Exception:
+            report[key] = value
+    return report
+
+
+def load_records_from_ae_ready(ae_ready, days):
+    tabs = ae_ready["tabs"]
+    allowed_days = day_filter_keys(days)
+    legacy_sessions = filter_rows_by_day(tabs.get("content_plan_sessions", []), allowed_days)
+    for row in legacy_sessions:
+        row[COMP_NAME_HEADER] = session_comp_name(row.get("ПЛОЩАДКА", ""), row.get("ТЕМА", ""))
+    badges = filter_rows_by_day(tabs.get("content_plan_plates", []), allowed_days)
+    cards = filter_rows_by_day(tabs.get("content_plan_cards", []), allowed_days)
+    topics = filter_rows_by_day(tabs.get("content_plan_topics_model", []), allowed_days) if tabs.get("content_plan_topics_model") else derive_topics_from_legacy_sessions(legacy_sessions)
+    sessions = filter_rows_by_day(tabs.get("content_plan_sessions_model", []), allowed_days) if tabs.get("content_plan_sessions_model") else derive_sessions_model_from_legacy(legacy_sessions)
+    people = tabs.get("content_plan_all_people", []) or derive_people_from_badges_and_cards(badges, cards)
+    session_people = filter_rows_by_day(tabs.get("content_plan_session_people", []), allowed_days) if tabs.get("content_plan_session_people") else derive_session_people_from_badges(badges, people)
+    if tabs.get("content_plan_all_people"):
+        allowed_person_ids = {row.get("person_id", "") for row in session_people if row.get("person_id", "")}
+        allowed_names = {normalize_key(row.get("ФИО спикера", "")) for row in session_people if normalize_key(row.get("ФИО спикера", ""))}
+        people = [
+            row for row in people
+            if row.get("person_id", "") in allowed_person_ids or normalize_key(row.get("ФИО спикера", "")) in allowed_names
+        ] if allowed_person_ids or allowed_names else []
+    warnings_rows = tabs.get("warnings", [])
+    source_cells = filter_rows_by_day(tabs.get("source_cells", []), allowed_days) if tabs.get("source_cells") else []
+    import_report = parse_import_report_rows(tabs.get("import_report", []))
+    report_warnings = [inline_text(row.get("message", "")) for row in warnings_rows if inline_text(row.get("message", ""))]
+    days_found = []
+    for row in legacy_sessions:
+        label = "{} {}".format(inline_text(row.get("ДЕНЬ", "")), inline_text(row.get("ДАТА", ""))).strip()
+        if label and label not in days_found:
+            days_found.append(label)
+    report = {
+        "sessions_found": len(legacy_sessions),
+        "topics_found": len(topics),
+        "people_found": len(session_people),
+        "unique_people": len(people),
+        "duplicates_merged": int(import_report.get("duplicates_merged", 0) or 0),
+        "badges": len(badges),
+        "cards": len(cards),
+        "cards_ready": sum(1 for row in cards if inline_text(row.get("card_status", "")) == "ready"),
+        "cards_missing_photo": sum(1 for row in cards if inline_text(row.get("card_status", "")) == "missing_photo"),
+        "venues": len(derive_venues_from_sessions(sessions)),
+        "ignored_non_bcd_cells": int(import_report.get("ignored_non_bcd_cells", 0) or 0),
+        "time_column": import_report.get("time_column", ""),
+        "days": days_found,
+        "time_rows": int(import_report.get("time_rows", 0) or 0),
+        "people_ref_matches": int(import_report.get("people_ref_matches", 0) or 0),
+        "warnings": report_warnings,
+    }
+    return {
+        "venues": derive_venues_from_sessions(sessions),
+        "topics": topics,
+        "sessions": sessions,
+        "people": people,
+        "session_people": session_people,
+        "badges": badges,
+        "cards": cards,
+        "legacy_sessions": legacy_sessions,
+        "report": report,
+        "warnings_rows": warnings_rows,
+        "source_cells": source_cells,
+    }
+
+
 def main(argv):
     status_path = None
     try:
         args = parse_args(argv)
         status_path = status_path_arg(args.status_json)
-        text, resolved_source = read_source(args.source)
-        if len(text.splitlines()) < 3:
-            raise UserFacingError("Источник похож на пустой файл.")
-        if "<html" in text[:1000].lower() or "<!doctype html" in text[:1000].lower():
-            raise UserFacingError("Google вернул HTML, а не TSV. Проверь доступ к таблице по ссылке.")
-
-        rows = parse_table_rows(text, args.delimiter)
-        people_reference = None
-        reference_warning = ""
-        if not args.no_people_ref and str(args.people_ref_url or "").strip():
-            try:
-                ref_text, _resolved_ref = read_source(args.people_ref_url)
-                people_reference = build_people_reference(ref_text)
-                if not people_reference:
-                    reference_warning = "Справочник ФИО загружен, но в нем не найдены колонки ФИО/Должность или строки людей."
-            except Exception as ref_exc:
-                reference_warning = "Не удалось загрузить справочник ФИО/Должность: {}".format(ref_exc)
-        records = build_records(rows, args.day, people_reference, reference_warning)
+        ae_ready = load_ae_ready_source(args.source)
+        records = load_records_from_ae_ready(ae_ready, args.day)
         report = records["report"]
-        report["source_hash"] = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        source_hash_payload = "".join(ae_ready["source_texts"].get(name, "") for name in sorted(ae_ready["source_texts"].keys()))
+        report["people_ref_sources"] = []
+        report["source_hash"] = hashlib.sha256(source_hash_payload.encode("utf-8")).hexdigest()
         report["data_hash"] = stable_records_hash(records)
         if not records["sessions"] and not records["people"] and not records["badges"]:
             day_hint = ", ".join(report["days"][:8]) if report["days"] else "дни не найдены"
             filter_hint = " Фильтр дня: {}.".format(", ".join(args.day)) if args.day else ""
             raise UserFacingError(
-                "Не найдено ни одной темы/персоны. Найдено строк времени: {}. Найденные дни: {}.{} "
-                "Проверь лист, фильтр дня и наличие блоков 'Тема:', 'Эксперт:', 'Гости:' в колонках B/C/D.".format(
-                    report["time_rows"], day_hint, filter_hint
-                )
+                "Не найдено ни одной строки в нормализованной AE-ready таблице. Найденные дни: {}.{} "
+                "Проверь ссылку на AE-ready таблицу, названия вкладок и фильтр дня.".format(day_hint, filter_hint)
             )
 
         output_dir = local_path_arg(args.output_dir)
@@ -860,15 +1360,15 @@ def main(argv):
         write_tsv(output_dir / "content_plan_badges.tsv", BADGE_FIELDS, records["badges"])
         write_tsv(output_dir / "content_plan_cards_model.tsv", CARD_FIELDS, records["cards"])
 
-        write_tsv(output_dir / "content_plan_sessions.tsv", LEGACY_SESSION_FIELDS, legacy_sessions(records))
+        write_tsv(output_dir / "content_plan_sessions.tsv", LEGACY_SESSION_FIELDS, records["legacy_sessions"])
         write_tsv(output_dir / "content_plan_plates.tsv", BADGE_FIELDS, records["badges"])
         write_tsv(output_dir / "content_plan_cards.tsv", CARD_FIELDS, records["cards"])
         write_tsv(output_dir / "content_plan_all_people.tsv", PEOPLE_FIELDS, records["people"])
         write_json(output_dir / "import_report.json", report)
 
-        print("SOURCE: {}".format(resolved_source))
+        print("SOURCE: {}".format(args.source))
         print("OUTPUT: {}".format(output_dir))
-        print("LAYOUT: strict_venues=B/C/D, time_column={}".format(report["time_column"]))
+        print("LAYOUT: ae_ready_tabs={}, time_column={}".format(",".join(sorted(ae_ready["tabs"].keys())), report["time_column"]))
         print(
             "SUCCESS: topics={}, sessions={}, unique_people={}, badges={}, cards={}, duplicates_merged={}".format(
                 report["topics_found"], report["sessions_found"], report["unique_people"], report["badges"], report["cards"], report["duplicates_merged"]
@@ -879,7 +1379,7 @@ def main(argv):
 
         status = {
             "ok": True,
-            "source": resolved_source,
+            "source": args.source,
             "output": str(output_dir),
             "sessions": report["sessions_found"],
             "plates": report["badges"],
@@ -889,6 +1389,8 @@ def main(argv):
             "duplicates_merged": report["duplicates_merged"],
             "cards_missing_photo": report["cards_missing_photo"],
             "people_ref_matches": report["people_ref_matches"],
+            "people_ref_sources_ok": 0,
+            "people_ref_sources_total": 0,
             "days": report["days"],
             "warnings": report["warnings"],
             "source_hash": report["source_hash"],

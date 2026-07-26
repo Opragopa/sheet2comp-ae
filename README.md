@@ -9,9 +9,9 @@
 | Простые плашки из Google Sheets: имя + регалии в текстовых слоях | `Sheets-to-AE-Comp-Generator.jsx` | After Effects |
 | Плашки/визитки персон с фото из Google Sheets или локальной таблицы | `person_plates_from_sheet.jsx` | After Effects |
 | Добавить выбранные композиции в Render Queue и сократить имена файлов | `shorten_render_queue_names.jsx` | After Effects |
-| Подготовить общий контент-план и открыть генераторы тем/плашек/визиток | `content_plan_from_sheet.jsx` | After Effects |
+| Забрать нормализованные AE-ready вкладки и открыть генераторы тем/плашек/визиток | `content_plan_from_sheet.jsx` | After Effects |
 | Композиции с темами сессий из TSV/CSV/Google Sheet | `session_topics_from_sheet.jsx` | After Effects |
-| Разобрать общий контент-план по дням на темы, плашки и визитки | `extract_content_plan.py` | Терминал / GUI |
+| Забрать из AE-ready таблицы готовые вкладки по дням на темы, плашки и визитки | `extract_content_plan.py` | Терминал / GUI |
 | Фоново следить за обновлениями двух Google Sheets | `sheet_update_monitor.py` | macOS / Терминал |
 | Заранее скачать и переименовать фото для персон | `prepare_person_plate_photos.py` | Терминал |
 | Достать темы сессий из большой программной таблицы в TSV | `extract_session_topics.py` | Терминал |
@@ -26,7 +26,26 @@
 - Adobe After Effects 2024+
 - Python 3
 - Python-пакеты из `requirements.txt`
-- Для Google Sheets: таблица должна быть доступна по ссылке или опубликована/export-доступна в CSV/TSV
+- Для Google Sheets: AE-ready таблица должна быть доступна по ссылке для чтения
+
+## AE-ready Контент-план
+
+Теперь `content_plan_from_sheet.jsx` и `extract_content_plan.py` работают не с сырым листом программы, а только с нормализованной `AE-ready` таблицей, которую создает бот из `/Users/opragopa/Documents/tg-pushes-TS26`.
+
+Ожидаются вкладки:
+
+```text
+content_plan_sessions
+content_plan_plates
+content_plan_cards
+```
+
+Если в AE-ready таблице есть и модельные вкладки `content_plan_all_people`, `content_plan_topics_model`, `content_plan_sessions_model`, `content_plan_session_people`, они тоже будут использованы и сохранены в выходную папку.
+
+В `content_plan_from_sheet.jsx` в поле источника теперь нужно вставлять:
+
+- ссылку на AE-ready Google Sheet из бота;
+- или папку, где уже лежат файлы `content_plan_*.tsv`.
 
 Кириллица поддерживается: скрипты читают и пишут UTF-8, JSON сохраняется с русскими символами, а имена файлов чистятся только от запрещенных символов `\ / : * ? " < > |`.
 
@@ -196,7 +215,7 @@ install_windows.bat "C:\Program Files\Adobe\Adobe After Effects 2026\Support Fil
 
 Для обычных таблиц имя композиции строится в порядке `Фамилия Имя` без номера и должности. Если TSV пришел из контент-плана и в нем есть время выступления, плашки называются по времени и человеку, например `09-30_Таньшина Наталья` и `11-00_Таньшина Наталья`. Сокращения и полные имена одного человека склеиваются по фамилии и первой букве имени: `Морская Е.` и `Морская Елизавета` станут `Морская Елизавета`. Для повторных выступлений первая по времени плашка создается полноценно, а следующие композиции этого спикера содержат внутри только первую плашку, чтобы правки в базовой композиции подтягивались дальше. Должность записывается прямо в текстовый слой `ДОЛЖНОСТЬ`, а слой `ИМЯ` остается в формате `ИМЯ ФАМИЛИЯ`.
 
-Для слоя `ДОЛЖНОСТЬ` скрипт ставит Source Text expression автоподгонки размера. Expression читает текущий текст самого слоя, поэтому должность автоматически подтягивается из таблицы при создании, но ее можно потом вручную изменить в After Effects через `Source Text`. Слайдеры размера ищутся сначала на слое `CONTROL`, затем на `CONTROLLER`: `Regalia Base Size`, `Regalia Min Size`, `Regalia Chars Per Line`, `Regalia Max Lines`, `Regalia Manual Size`.
+Для слоя `ДОЛЖНОСТЬ` скрипт ставит Source Text expression автоподгонки размера. Expression читает текущий текст самого слоя, поэтому должность автоматически подтягивается из таблицы при создании, но ее можно потом вручную изменить в After Effects через `Source Text`. Если включить `Пересоздать уже созданные композиции`, скрипт перед удалением старой плашки сохраняет текущий текст слоев `ИМЯ` и `ДОЛЖНОСТЬ` и переносит его в новую композицию. Так ручные правки вроде `е` -> `ё` и переносов строк остаются при массовом перерендере. Слайдеры размера ищутся сначала на слое `CONTROL`, затем на `CONTROLLER`: `Regalia Base Size`, `Regalia Min Size`, `Regalia Chars Per Line`, `Regalia Max Lines`, `Regalia Manual Size`.
 
 По умолчанию используются:
 
@@ -655,7 +674,7 @@ Python не имеет доступа к Google Sheets. Откройте дос�
 
 ### AE не видит новые скрипты
 
-Перезапустите After Effects после установки. Скрипты должны лежать в папке `Scripts`, а не `ScriptUI Panels`.
+Перезапустите After Effects после установки. Скрипты ставятся в `Scripts`, а панели `content_plan_from_sheet.jsx`, `session_topics_from_sheet.jsx` и `person_plates_from_sheet.jsx` дополнительно копируются в `ScriptUI Panels`, чтобы их можно было открыть через `Window`.
 
 ### Не найден текстовый слой
 
