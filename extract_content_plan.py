@@ -4,8 +4,11 @@ import csv
 import hashlib
 import io
 import json
+import os
 import re
+import shutil
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -1016,6 +1019,36 @@ def write_tsv(path, fieldnames, rows):
         writer.writerows(rows)
 
 
+def output_file_specs(records):
+    return [
+        ("content_plan_venues.tsv", VENUE_FIELDS, records["venues"]),
+        ("content_plan_topics.tsv", TOPIC_FIELDS, records["topics"]),
+        ("content_plan_sessions_model.tsv", SESSION_MODEL_FIELDS, records["sessions"]),
+        ("content_plan_session_people.tsv", SESSION_PEOPLE_FIELDS, records["session_people"]),
+        ("content_plan_people.tsv", PEOPLE_FIELDS, records["people"]),
+        ("content_plan_badges.tsv", BADGE_FIELDS, records["badges"]),
+        ("content_plan_cards_model.tsv", CARD_FIELDS, records["cards"]),
+        ("content_plan_sessions.tsv", LEGACY_SESSION_FIELDS, records["legacy_sessions"]),
+        ("content_plan_plates.tsv", BADGE_FIELDS, records["badges"]),
+        ("content_plan_cards.tsv", CARD_FIELDS, records["cards"]),
+        ("content_plan_all_people.tsv", PEOPLE_FIELDS, records["people"]),
+    ]
+
+
+def write_records_atomically(output_dir, records, report):
+    """Keep the previous export intact until every next file is ready."""
+    staging_dir = Path(tempfile.mkdtemp(prefix=".content_plan_stage_", dir=str(output_dir.parent)))
+    try:
+        for name, fields, rows in output_file_specs(records):
+            write_tsv(staging_dir / name, fields, rows)
+        write_json(staging_dir / "import_report.json", report)
+        for name, _fields, _rows in output_file_specs(records):
+            os.replace(staging_dir / name, output_dir / name)
+        os.replace(staging_dir / "import_report.json", output_dir / "import_report.json")
+    finally:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+
+
 def validate_output_dir(path):
     parent = path.parent
     if not parent.exists():
@@ -1352,19 +1385,7 @@ def main(argv):
         validate_output_dir(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        write_tsv(output_dir / "content_plan_venues.tsv", VENUE_FIELDS, records["venues"])
-        write_tsv(output_dir / "content_plan_topics.tsv", TOPIC_FIELDS, records["topics"])
-        write_tsv(output_dir / "content_plan_sessions_model.tsv", SESSION_MODEL_FIELDS, records["sessions"])
-        write_tsv(output_dir / "content_plan_session_people.tsv", SESSION_PEOPLE_FIELDS, records["session_people"])
-        write_tsv(output_dir / "content_plan_people.tsv", PEOPLE_FIELDS, records["people"])
-        write_tsv(output_dir / "content_plan_badges.tsv", BADGE_FIELDS, records["badges"])
-        write_tsv(output_dir / "content_plan_cards_model.tsv", CARD_FIELDS, records["cards"])
-
-        write_tsv(output_dir / "content_plan_sessions.tsv", LEGACY_SESSION_FIELDS, records["legacy_sessions"])
-        write_tsv(output_dir / "content_plan_plates.tsv", BADGE_FIELDS, records["badges"])
-        write_tsv(output_dir / "content_plan_cards.tsv", CARD_FIELDS, records["cards"])
-        write_tsv(output_dir / "content_plan_all_people.tsv", PEOPLE_FIELDS, records["people"])
-        write_json(output_dir / "import_report.json", report)
+        write_records_atomically(output_dir, records, report)
 
         print("SOURCE: {}".format(args.source))
         print("OUTPUT: {}".format(output_dir))

@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
+import tempfile
 import unittest
+from pathlib import Path
 
 import content_quality as quality
 import extract_content_plan as content
@@ -8,6 +10,35 @@ import extract_session_topics as topics
 
 
 class PersonQualityTests(unittest.TestCase):
+    def test_atomic_export_keeps_previous_files_when_staging_fails(self):
+        records = {
+            "venues": [], "topics": [], "sessions": [], "session_people": [], "people": [],
+            "badges": [], "cards": [], "legacy_sessions": [],
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir) / "content_plan"
+            output_dir.mkdir()
+            previous = output_dir / "content_plan_sessions.tsv"
+            previous.write_text("previous export", encoding="utf-8")
+
+            original_write_tsv = content.write_tsv
+            calls = {"count": 0}
+
+            def fail_during_staging(path, fields, rows):
+                calls["count"] += 1
+                if calls["count"] == 2:
+                    raise OSError("disk full")
+                original_write_tsv(path, fields, rows)
+
+            content.write_tsv = fail_during_staging
+            try:
+                with self.assertRaisesRegex(OSError, "disk full"):
+                    content.write_records_atomically(output_dir, records, {})
+            finally:
+                content.write_tsv = original_write_tsv
+
+            self.assertEqual("previous export", previous.read_text(encoding="utf-8"))
+
     def test_rejects_false_composition_names_from_real_import(self):
         bad_values = [
             "Фонда «ВЦИОМ»",

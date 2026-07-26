@@ -98,6 +98,7 @@ install_windows.bat "C:\Program Files\Adobe\Adobe After Effects 2026\Support Fil
 - `prepare_person_plate_photos.py`
 - `extract_session_topics.py`
 - `extract_content_plan.py`
+- `content_quality.py`
 - `ae_parser_config.json` с путем к найденному Python
 
 ## Простые Плашки

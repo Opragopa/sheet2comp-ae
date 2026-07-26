@@ -199,15 +199,6 @@
         var cmd = buildPythonCommand(runtime.pythonCmd, source, outputArg, day, statusFile);
         statusText.text = "Готовлю TSV...";
 
-        var oldSessionsFile = contentFile(outputArg, "content_plan_sessions.tsv");
-        var oldPlatesFile = contentFile(outputArg, "content_plan_plates.tsv");
-        var oldCardsFile = contentFile(outputArg, "content_plan_cards.tsv");
-        var oldAllFile = contentFile(outputArg, "content_plan_all_people.tsv");
-        try { if (oldSessionsFile.exists) oldSessionsFile.remove(); } catch (remove1) {}
-        try { if (oldPlatesFile.exists) oldPlatesFile.remove(); } catch (remove2) {}
-        try { if (oldCardsFile.exists) oldCardsFile.remove(); } catch (remove3) {}
-        try { if (oldAllFile.exists) oldAllFile.remove(); } catch (remove4) {}
-
         var output = system.callSystem(cmd);
         $.sleep(300);
         var status = readStatusFile(statusFile);
@@ -704,13 +695,13 @@
         var shiftInput = addLabeledEdit(sourcePanel, "Смена", settings.shiftName, 20);
         shiftInput.helpTip = "Например: ЕДИНСТВО, РОДИНА или ПРАВДА. Используется для папок и шаблона темы.";
         var platesOutputInput = addLabeledEdit(sourcePanel, "Output To плашек", settings.platesOutputToTemplate, 58);
-        platesOutputInput.helpTip = "Сейчас не применяется автоматически. Output To выставляется вручную в Render Queue.";
+        platesOutputInput.helpTip = "Применяется к новым плашкам при обновлении информации.";
         var platesOutputPresetInput = addLabeledEdit(sourcePanel, "Preset плашек", settings.platesOutputToPreset, 32);
-        platesOutputPresetInput.helpTip = "Сейчас не применяется автоматически. Output To preset выбирается вручную в Render Queue.";
+        platesOutputPresetInput.helpTip = "Применяется к новым плашкам после добавления в Render Queue.";
         var topicsOutputInput = addLabeledEdit(sourcePanel, "Output To тем", settings.topicsOutputToTemplate, 58);
-        topicsOutputInput.helpTip = "Сейчас не применяется автоматически. Output To выставляется вручную в Render Queue.";
+        topicsOutputInput.helpTip = "Применяется к новым темам сессий при обновлении информации.";
         var topicsOutputPresetInput = addLabeledEdit(sourcePanel, "Preset тем", settings.topicsOutputToPreset, 32);
-        topicsOutputPresetInput.helpTip = "Сейчас не применяется автоматически. Output To preset выбирается вручную в Render Queue.";
+        topicsOutputPresetInput.helpTip = "Применяется к новым темам после добавления в Render Queue.";
         var renderCheck = sourcePanel.add("checkbox", undefined, "Сразу запустить Render Queue после обновления");
         renderCheck.value = settings.autoStartRender === true;
 

@@ -15,6 +15,7 @@ set "PREPARE_PERSON_PY=prepare_person_plate_photos.py"
 set "EXTRACT_PY=extract_session_topics.py"
 set "CONTENT_PLAN_PY=extract_content_plan.py"
 set "RECORDING_PY=extract_recording_plan.py"
+set "QUALITY_PY=content_quality.py"
 
 if not exist "%SCRIPT_DIR%%JSX%" (
   echo Missing %JSX%
@@ -48,6 +49,11 @@ if not exist "%SCRIPT_DIR%%CONTENT_PLAN_PY%" (
 
 if not exist "%SCRIPT_DIR%%RECORDING_PY%" (
   echo Missing %RECORDING_PY%
+  exit /b 1
+)
+
+if not exist "%SCRIPT_DIR%%QUALITY_PY%" (
+  echo Missing %QUALITY_PY%
   exit /b 1
 )
 
@@ -157,6 +163,9 @@ copy /Y "%SCRIPT_DIR%%CONTENT_PLAN_PY%" "%AE_SCRIPTS%\%CONTENT_PLAN_PY%" >nul
 if errorlevel 1 exit /b 1
 
 copy /Y "%SCRIPT_DIR%%RECORDING_PY%" "%AE_SCRIPTS%\%RECORDING_PY%" >nul
+if errorlevel 1 exit /b 1
+
+copy /Y "%SCRIPT_DIR%%QUALITY_PY%" "%AE_SCRIPTS%\%QUALITY_PY%" >nul
 if errorlevel 1 exit /b 1
 
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$cfg=@{pythonCmd=$env:PYTHON_CMD}|ConvertTo-Json; Set-Content -LiteralPath (Join-Path $env:AE_SCRIPTS 'ae_parser_config.json') -Value $cfg -Encoding UTF8"
