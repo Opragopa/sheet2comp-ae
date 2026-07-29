@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 import content_quality as quality
+import download_person_plate_data as photos
 import extract_content_plan as content
 import extract_recording_plan as recording
 import extract_session_topics as topics
@@ -84,6 +85,18 @@ class PersonQualityTests(unittest.TestCase):
 
     def test_all_caps_surname_is_normalized(self):
         self.assertEqual("Земцов Дмитрий", quality.canonical_last_first("ЗЕМЦОВ Дмитрий Игоревич"))
+
+    def test_ich_surname_is_not_treated_as_patronymic(self):
+        self.assertTrue(quality.looks_like_patronymic("Юрьевич"))
+        self.assertFalse(quality.looks_like_patronymic("Кастюкевич"))
+        self.assertEqual("Кастюкевич Игорь", quality.canonical_last_first("Кастюкевич Игорь Юрьевич"))
+        self.assertEqual("Кастюкевич Игорь", quality.canonical_last_first("Игорь Кастюкевич Юрьевич"))
+
+    def test_photo_import_keeps_ich_surname(self):
+        self.assertTrue(photos.is_patronymic("Юрьевич"))
+        self.assertFalse(photos.is_patronymic("Кастюкевич"))
+        self.assertEqual("ИГОРЬ КАСТЮКЕВИЧ", photos.format_first_name_last_name("Кастюкевич Игорь Юрьевич"))
+        self.assertEqual("Кастюкевич Игорь", photos.format_last_name_first_name("Кастюкевич Игорь Юрьевич"))
 
 
 class RecordingImportTests(unittest.TestCase):
